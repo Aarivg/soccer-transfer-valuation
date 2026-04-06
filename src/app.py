@@ -130,6 +130,7 @@ with st.sidebar:
     st.divider()
     st.metric("Players shown", len(df))
     st.caption(f"of {len(df_all)} total matched players")
+    st.caption("Data: FBref + Transfermarkt 2023-24 season")
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
@@ -137,6 +138,11 @@ st.title("⚽ Soccer Transfer Market Valuation Model")
 st.markdown(
     "Comparing **predicted vs actual** Transfermarkt market values "
     "across the Big 5 European leagues using **XGBoost**"
+)
+st.info(
+    "Model uses 11 features including performance stats, contract length, age, and league. "
+    "Predictions are adjusted for age potential and league prestige. "
+    "R² = 0.507 on holdout test set."
 )
 st.divider()
 
@@ -231,15 +237,18 @@ st.divider()
 st.subheader("Player Leaderboards")
 
 TABLE_COLS_RAW = ["player", "league_label", "team", "age",
-                  "actual_m", "predicted_m", "gap_m"]
+                  "actual_m", "predicted_m", "gap_m",
+                  "contract_years_remaining", "adjustment_factor"]
 TABLE_HEADERS  = {
-    "player":       "Player",
-    "league_label": "League",
-    "team":         "Club",
-    "age":          "Age",
-    "actual_m":     "Actual (€M)",
-    "predicted_m":  "Predicted (€M)",
-    "gap_m":        "Gap (€M)",
+    "player":                    "Player",
+    "league_label":              "League",
+    "team":                      "Club",
+    "age":                       "Age",
+    "actual_m":                  "Actual (€M)",
+    "predicted_m":               "Predicted (€M)",
+    "gap_m":                     "Gap (€M)",
+    "contract_years_remaining":  "Contract Yrs",
+    "adjustment_factor":         "Adj Factor",
 }
 
 
@@ -261,16 +270,21 @@ def _style_gap(col: pd.Series, positive_is_good: bool) -> list[str]:
 
 col_under, col_over = st.columns(2)
 
+def _build_leaderboard(source: pd.DataFrame) -> pd.DataFrame:
+    """Round new columns and apply header renames for a leaderboard table."""
+    tbl = source[TABLE_COLS_RAW].copy()
+    tbl["contract_years_remaining"] = tbl["contract_years_remaining"].round(1)
+    tbl["adjustment_factor"]        = tbl["adjustment_factor"].round(2)
+    tbl = tbl.rename(columns=TABLE_HEADERS).reset_index(drop=True)
+    tbl.index = tbl.index + 1
+    tbl["Gap (€M)"] = tbl["Gap (€M)"].apply(_fmt_gap)
+    return tbl
+
+
 with col_under:
     st.markdown("### 🟢 Most Undervalued Players")
     st.caption("Model predicts a higher value than Transfermarkt")
-    top_under = (
-        df.nlargest(15, "gap_m")[TABLE_COLS_RAW]
-        .rename(columns=TABLE_HEADERS)
-        .reset_index(drop=True)
-    )
-    top_under.index = top_under.index + 1  # 1-indexed rank
-    top_under["Gap (€M)"] = top_under["Gap (€M)"].apply(_fmt_gap)
+    top_under = _build_leaderboard(df.nlargest(15, "gap_m"))
     st.dataframe(
         top_under.style.apply(
             lambda col: _style_gap(
@@ -286,13 +300,7 @@ with col_under:
 with col_over:
     st.markdown("### 🔴 Most Overvalued Players")
     st.caption("Model predicts a lower value than Transfermarkt")
-    top_over = (
-        df.nsmallest(15, "gap_m")[TABLE_COLS_RAW]
-        .rename(columns=TABLE_HEADERS)
-        .reset_index(drop=True)
-    )
-    top_over.index = top_over.index + 1
-    top_over["Gap (€M)"] = top_over["Gap (€M)"].apply(_fmt_gap)
+    top_over = _build_leaderboard(df.nsmallest(15, "gap_m"))
     st.dataframe(
         top_over.style.apply(
             lambda col: _style_gap(
@@ -325,7 +333,7 @@ if selected_player != "— select a player —":
     gap_sign = "+" if gap_eur >= 0 else ""
 
     # Metric cards
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric(
         "Actual Value",
         f"€{row['actual_m']:.1f}M",
@@ -344,6 +352,11 @@ if selected_player != "— select a player —":
         "Undervaluation Rank",
         f"#{int(row['underval_rank'])}",
         help="Rank 1 = most undervalued among all matched players",
+    )
+    contract_val = row.get("contract_years_remaining")
+    m5.metric(
+        "Contract Years Left",
+        f"{contract_val:.1f}" if pd.notna(contract_val) else "N/A",
     )
 
     # Player context
@@ -425,6 +438,6 @@ st.plotly_chart(fig_fi, use_container_width=True)
 st.divider()
 st.caption(
     "Data: FBref (2023–24 season) · Transfermarkt (via Kaggle)  |  "
-    "Model: XGBoost · R²=0.475 · RMSE=€20.4M on test set  |  "
+    "Model: XGBoost · R²=0.507 · RMSE=€19.8M on test set  |  "
     "Portfolio project — not for commercial use"
 )
