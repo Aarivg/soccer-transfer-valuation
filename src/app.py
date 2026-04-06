@@ -190,7 +190,7 @@ fig_scatter.add_trace(go.Scatter(
     x=[0, max_val],
     y=[0, max_val],
     mode="lines",
-    line=dict(color="rgba(150,150,150,0.6)", width=1.5, dash="dash"),
+    line=dict(color="#555555", width=1.5, dash="dash"),
     name="Perfect prediction",
     hoverinfo="skip",
 ))
@@ -198,15 +198,27 @@ fig_scatter.add_trace(go.Scatter(
 fig_scatter.update_layout(
     height=560,
     margin=dict(l=20, r=20, t=50, b=20),
-    legend=dict(title="League", orientation="v", x=1.01, y=1),
-    xaxis=dict(title="Actual Market Value (€M)", gridcolor="#f0f0f0"),
-    yaxis=dict(title="Predicted Market Value (€M)", gridcolor="#f0f0f0"),
-    plot_bgcolor="white",
-    paper_bgcolor="white",
-    font=dict(family="Inter, Arial, sans-serif"),
+    paper_bgcolor="#0e1117",
+    plot_bgcolor="#0e1117",
+    font=dict(family="Inter, Arial, sans-serif", color="#ffffff"),
+    legend=dict(title="League", orientation="v", x=1.01, y=1, font=dict(color="#ffffff")),
+    xaxis=dict(
+        title="Actual Market Value (€M)",
+        title_font=dict(color="#ffffff"),
+        tickfont=dict(color="#ffffff"),
+        gridcolor="#333333",
+        zerolinecolor="#333333",
+    ),
+    yaxis=dict(
+        title="Predicted Market Value (€M)",
+        title_font=dict(color="#ffffff"),
+        tickfont=dict(color="#ffffff"),
+        gridcolor="#333333",
+        zerolinecolor="#333333",
+    ),
 )
 fig_scatter.update_traces(
-    marker=dict(opacity=0.75, line=dict(width=0.4, color="white")),
+    marker=dict(opacity=0.75, line=dict(width=0.4, color="#0e1117")),
     selector=dict(mode="markers"),
 )
 
@@ -386,12 +398,24 @@ fig_fi.update_traces(
 fig_fi.update_layout(
     height=400,
     margin=dict(l=20, r=80, t=50, b=20),
+    paper_bgcolor="#0e1117",
+    plot_bgcolor="#0e1117",
+    font=dict(family="Inter, Arial, sans-serif", color="#ffffff"),
     coloraxis_showscale=False,
-    xaxis=dict(title="Feature Importance (Gain)", tickformat=".0%", gridcolor="#f0f0f0"),
-    yaxis=dict(title=""),
-    plot_bgcolor="white",
-    paper_bgcolor="white",
-    font=dict(family="Inter, Arial, sans-serif"),
+    xaxis=dict(
+        title="Feature Importance (Gain)",
+        title_font=dict(color="#ffffff"),
+        tickfont=dict(color="#ffffff"),
+        tickformat=".0%",
+        gridcolor="#333333",
+        zerolinecolor="#333333",
+    ),
+    yaxis=dict(
+        title="",
+        tickfont=dict(color="#ffffff"),
+        gridcolor="#333333",
+        zerolinecolor="#333333",
+    ),
 )
 
 st.plotly_chart(fig_fi, use_container_width=True)
