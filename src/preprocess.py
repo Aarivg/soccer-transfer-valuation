@@ -7,10 +7,27 @@ Merges FBref per-90 stats with Transfermarkt market valuations for the
 Pipeline
 --------
 1. Load & clean FBref stats (via scrape_fbref.fetch_fbref_stats)
-2. Engineer features (position groups, age buckets, log-value target)
-3. Load & filter player_valuations.csv to Big 5 / 2023-24 season window
-4. Join on player name + club  ← requires players.csv (see NOTE below)
-5. Save processed outputs to data/processed/
+2. Augment with shooting stats from fbref_shooting_2324.csv
+3. Engineer features (position groups, age buckets, log-value target)
+4. Load & filter player_valuations.csv to Big 5 / 2023-24 season window
+5. Join on player name + club  ← requires players.csv (see NOTE below)
+6. Save processed outputs to data/processed/
+
+FBref supplementary CSV audit (what is actually populated)
+----------------------------------------------------------
+fbref_shooting_2324.csv  → Gls, Sh, SoT, SoT%, Sh/90, SoT/90, G/Sh, G/SoT, PK, PKatt
+    NOTE: xG and npxG are NOT present. FBref's CSV export for the shooting page
+    only includes the "Standard" section. The "Expected" section (xG, npxG, xA)
+    requires a separate FBref export tab. Re-export that tab and add it as
+    fbref_expected_2324.csv to pick those columns up automatically.
+fbref_passing_2324.csv   → Ast only (all other columns blank in the export)
+fbref_possession_2324.csv → no stat columns populated (identity cols only)
+
+Columns added to the feature set from these files:
+    shots_p90      (Sh/90)   – shooting volume
+    sot_p90        (SoT/90)  – shots on target per 90
+    g_per_shot     (G/Sh)    – finishing efficiency
+    sot_pct        (SoT%)    – shot accuracy (skipped in model — collinear with sot_p90/shots_p90)
 
 NOTE — Missing file: players.csv
 ----------------------------------
@@ -18,10 +35,6 @@ player_valuations.csv is keyed on player_id only; it contains no player names.
 To complete the FBref ↔ Transfermarkt join you need the Kaggle companion file
 players.csv from the same dataset (transfermarkt-scraper or similar).
 It should have at minimum: player_id, name, current_club_name.
-
-Once you add data/raw/players.csv the full merge will run automatically.
-Without it the script still runs and saves the FBref feature table, which
-is sufficient to start exploratory analysis and baseline modelling.
 """
 
 import logging
@@ -110,6 +123,210 @@ def build_fbref_features(df: pd.DataFrame) -> pd.DataFrame:
         out["goal_inv_p90"] = (out["goals_p90"] + out["assists_p90"]).round(3)
 
     return out
+
+
+# ── Contract years remaining ──────────────────────────────────────────────────
+
+CONTRACT_SEASON_YEAR = 2024   # reference year: end of 2023-24 season
+CONTRACT_MIN_COVERAGE = 0.80  # skip if fewer than this fraction of rows have data
+CONTRACT_CAP = (0, 8)         # plausible range; clip outliers
+
+
+def load_contract_features(season_slug: str = "2324") -> Optional[pd.DataFrame]:
+    """
+    Build a (name_norm, comp_id) → contract_years_remaining lookup from
+    data/raw/players.csv joined to data/raw/player_valuations.csv.
+
+    Prints all available columns in players.csv so the caller can confirm
+    which contract field was used.
+
+    Returns a DataFrame with columns [name_norm, comp_id,
+    contract_years_remaining], or None if the feature cannot be built
+    (file missing, column absent, or coverage below threshold).
+    """
+    players_path = RAW_DIR / "players.csv"
+    val_path     = RAW_DIR / "player_valuations.csv"
+
+    if not players_path.exists():
+        log.warning("players.csv not found — skipping contract feature")
+        return None
+    if not val_path.exists():
+        log.warning("player_valuations.csv not found — skipping contract feature")
+        return None
+
+    # ── Inspect players.csv columns ───────────────────────────────────────────
+    players = pd.read_csv(players_path)
+    log.info("players.csv columns (%d total): %s", len(players.columns),
+             players.columns.tolist())
+
+    contract_col = "contract_expiration_date"
+    if contract_col not in players.columns:
+        log.warning("Column %r not found in players.csv — skipping contract feature", contract_col)
+        return None
+
+    nn_overall = players[contract_col].notna().sum()
+    log.info("players.csv  contract_expiration_date  non-null=%d / %d  (%.1f%%)",
+             nn_overall, len(players), 100 * nn_overall / len(players))
+
+    # ── Build player_id → contract_years_remaining ────────────────────────────
+    players_slim = players[["player_id", "name", contract_col]].copy()
+    players_slim[contract_col] = pd.to_datetime(
+        players_slim[contract_col], errors="coerce"
+    )
+    players_slim["contract_years_remaining"] = (
+        players_slim[contract_col].dt.year - CONTRACT_SEASON_YEAR
+    ).clip(*CONTRACT_CAP)
+
+    # ── Restrict to Big5 2023-24 season player_ids ────────────────────────────
+    val = pd.read_csv(val_path, parse_dates=["date"])
+    val5 = val[
+        val["player_club_domestic_competition_id"].isin(BIG5_COMP_IDS)
+        & (val["date"] >= "2023-07-01")
+        & (val["date"] <= "2024-06-30")
+    ]
+    latest = (
+        val5.sort_values("date")
+            .groupby("player_id", as_index=False)
+            .last()[["player_id", "player_club_domestic_competition_id"]]
+            .rename(columns={"player_club_domestic_competition_id": "comp_id"})
+    )
+
+    # Join: latest_ids → player name + contract
+    named = latest.merge(
+        players_slim[["player_id", "name", "contract_years_remaining"]],
+        on="player_id",
+        how="left",
+    )
+
+    nn_big5 = named["contract_years_remaining"].notna().sum()
+    coverage = nn_big5 / max(len(named), 1)
+    log.info("Big5 2324 players — contract_years_remaining: %d / %d  (%.1f%%)",
+             nn_big5, len(named), 100 * coverage)
+
+    if coverage < CONTRACT_MIN_COVERAGE:
+        log.warning(
+            "Coverage %.1f%% < %.0f%% threshold — skipping contract feature",
+            100 * coverage, 100 * CONTRACT_MIN_COVERAGE,
+        )
+        return None
+
+    # ── Normalise names for joining to FBref ──────────────────────────────────
+    named["name_norm"] = named["name"].apply(_normalise_name)
+
+    result = (
+        named[["name_norm", "comp_id", "contract_years_remaining"]]
+        .dropna(subset=["contract_years_remaining"])
+        .drop_duplicates(subset=["name_norm", "comp_id"])
+    )
+    log.info("Contract feature lookup: %d (name_norm, comp_id) pairs", len(result))
+    return result
+
+
+# ── FBref supplementary stat loader ──────────────────────────────────────────
+
+# Maps (filename → {raw_col: output_col}) for every supplementary file we try.
+# Each raw_col is the FBref header-row name; only populated columns are kept.
+SUPPLEMENTARY_FILES = {
+    "fbref_shooting_2324.csv": {
+        "Sh/90":  "shots_p90",
+        "SoT/90": "sot_p90",
+        "G/Sh":   "g_per_shot",
+        # xG / npxG deliberately omitted — not present in this export
+    },
+    "fbref_passing_2324.csv": {
+        # xAG, PrgP not populated in the CSV export — omitted
+    },
+    "fbref_possession_2324.csv": {
+        # PrgC, touches_att_third not populated — omitted
+    },
+}
+
+JOIN_KEYS_SUPPL = ["player", "team"]   # squad-level join (no league needed)
+
+
+def load_supplementary_stats(season_slug: str = "2324") -> Optional[pd.DataFrame]:
+    """
+    Inspect each supplementary FBref CSV, report what is actually populated,
+    and return a merged DataFrame of new features keyed on (player, team).
+
+    Returns None if no supplementary files exist or none have usable data.
+    """
+    import csv as csv_mod
+
+    frames: list[pd.DataFrame] = []
+
+    for filename, wanted_cols in SUPPLEMENTARY_FILES.items():
+        path = RAW_DIR / filename
+        if not path.exists():
+            log.info("  [SKIP] %s — file not found", filename)
+            continue
+
+        # Audit which columns are populated BEFORE loading with pandas
+        with open(path) as f:
+            raw_rows = list(csv_mod.reader(f))
+        headers   = raw_rows[1]
+        data_rows = [r for r in raw_rows[2:] if r and r[0] not in ("", "Rk")]
+        populated = {
+            h: sum(1 for r in data_rows if i < len(r) and r[i].strip() not in ("", "Matches"))
+            for i, h in enumerate(headers)
+        }
+        # Exclude identity columns from the report
+        identity = {"Rk", "Player", "Nation", "Pos", "Squad", "Comp", "Age", "Born", "90s", "Matches"}
+        stat_populated = {k: v for k, v in populated.items() if k not in identity and v > 0}
+
+        log.info("  %s — populated stat columns: %s",
+                 filename, stat_populated if stat_populated else "NONE")
+
+        if not wanted_cols:
+            log.info("    → No target columns configured for this file — skipping")
+            continue
+
+        # Load and clean
+        df = pd.read_csv(path, header=1, dtype=str)
+        df = df[df.iloc[:, 0] != "Rk"].copy()
+        df = df[df["Player"].notna() & (df["Player"].str.strip() != "")].copy()
+        df["Player"] = df["Player"].str.strip()
+        df["Squad"]  = df["Squad"].str.strip()
+
+        # Keep only columns that are (a) wanted and (b) actually populated
+        kept: dict[str, str] = {}
+        skipped: list[str] = []
+        for raw_col, out_col in wanted_cols.items():
+            if raw_col not in df.columns:
+                skipped.append(f"{raw_col} (not in file)")
+                continue
+            n_populated = populated.get(raw_col, 0)
+            if n_populated == 0:
+                skipped.append(f"{raw_col} (all null)")
+                continue
+            df[out_col] = pd.to_numeric(
+                df[raw_col].str.replace(",", "", regex=False), errors="coerce"
+            )
+            kept[raw_col] = out_col
+
+        if skipped:
+            log.info("    → Skipped (not populated): %s", skipped)
+        if not kept:
+            log.info("    → No usable columns extracted from %s", filename)
+            continue
+
+        log.info("    → Extracted: %s", kept)
+        out_cols = ["Player", "Squad"] + list(kept.values())
+        frame = df[out_cols].rename(columns={"Player": "player", "Squad": "team"})
+        frames.append(frame)
+
+    if not frames:
+        log.warning("No supplementary stats extracted from any file.")
+        return None
+
+    # Merge all supplementary frames together on (player, team)
+    merged = frames[0]
+    for frame in frames[1:]:
+        merged = merged.merge(frame, on=JOIN_KEYS_SUPPL, how="outer")
+
+    log.info("Supplementary stats: %d rows, new columns: %s",
+             len(merged), [c for c in merged.columns if c not in JOIN_KEYS_SUPPL])
+    return merged
 
 
 # ── Transfermarkt valuation processing ───────────────────────────────────────
@@ -341,14 +558,43 @@ def run_pipeline(season_slug: str = SEASON_SLUG) -> pd.DataFrame:
     """
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── Step 1: FBref ─────────────────────────────────────────────────────────
-    log.info("Loading FBref stats …")
+    # ── Step 1: FBref base stats ──────────────────────────────────────────────
+    log.info("Loading FBref base stats …")
     raw_fbref = fetch_fbref_stats(season_slug=season_slug)
-    fbref     = build_fbref_features(raw_fbref)
+
+    # ── Step 1b: Supplementary FBref stats ────────────────────────────────────
+    log.info("Loading supplementary FBref stats …")
+    suppl = load_supplementary_stats(season_slug=season_slug)
+    if suppl is not None:
+        before = len(raw_fbref)
+        raw_fbref = raw_fbref.merge(suppl, on=["player", "team"], how="left")
+        new_cols = [c for c in suppl.columns if c not in ("player", "team")]
+        log.info("Merged supplementary stats: %d cols added, %d rows (was %d)",
+                 len(new_cols), len(raw_fbref), before)
+        for col in new_cols:
+            nn = raw_fbref[col].notna().sum()
+            log.info("  %-20s  non-null=%d / %d", col, nn, len(raw_fbref))
+
+    fbref = build_fbref_features(raw_fbref)
 
     # Drop goalkeepers — different feature set, separate model needed
     fbref = fbref[fbref["position_group"] != "GK"].copy()
     log.info("FBref outfield players (≥ 900 min): %d", len(fbref))
+
+    # ── Step 1c: Contract years remaining ─────────────────────────────────────
+    log.info("Loading contract feature …")
+    contract_lookup = load_contract_features(season_slug=season_slug)
+    if contract_lookup is not None:
+        fbref["name_norm"] = fbref["player"].apply(_normalise_name)
+        fbref = fbref.merge(
+            contract_lookup, on=["name_norm", "comp_id"], how="left"
+        )
+        fbref = fbref.drop(columns=["name_norm"])
+        nn = fbref["contract_years_remaining"].notna().sum()
+        log.info("contract_years_remaining merged: %d / %d players (%.1f%%)",
+                 nn, len(fbref), 100 * nn / len(fbref))
+    else:
+        log.info("Skipped contract feature — not available")
 
     fbref_path = PROCESSED_DIR / f"fbref_features_{season_slug}.csv"
     fbref.to_csv(fbref_path, index=False)

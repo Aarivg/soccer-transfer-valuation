@@ -62,7 +62,17 @@ FEATURE_COLS = [
     "interceptions_p90",
     "age",
     "minutes_played",
+    # Added from fbref_shooting_2324.csv (r > 0.2 with target)
+    "shots_p90",
+    "sot_p90",
+    "g_per_shot",
+    # Added from players.csv via TM player_id chain (87.4% coverage, r=0.444)
+    "contract_years_remaining",
 ]
+
+# Baseline metrics from the 10-feature model (shooting features added)
+BASELINE_R2   = 0.4856
+BASELINE_RMSE = 20_132_528
 
 POSITION_COL = "position_group"   # will be one-hot encoded; MF dropped as reference
 TARGET_COL   = "log_market_value"
@@ -92,6 +102,9 @@ def load_data() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """
     Load model_dataset_2324.csv, restrict to rows with a market value,
     one-hot encode position, and return (df_matched, X, y).
+
+    Columns in FEATURE_COLS that are absent from the CSV are silently dropped
+    with a warning, so the model degrades gracefully if a file is missing.
     """
     df = pd.read_csv(INPUT_FILE)
 
@@ -100,11 +113,25 @@ def load_data() -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     print(f"Rows with market value: {len(df)} / {total}  "
           f"({total - len(df)} dropped — no Transfermarkt match)")
 
+    # Filter to columns that are present and have at least some non-null values
+    available = []
+    for col in FEATURE_COLS:
+        if col not in df.columns:
+            print(f"  [WARN] Feature '{col}' not found in dataset — skipped")
+        elif df[col].notna().sum() == 0:
+            print(f"  [WARN] Feature '{col}' is all-null — skipped")
+        else:
+            null_count = df[col].isna().sum()
+            if null_count > 0:
+                df[col] = df[col].fillna(df[col].median())
+                print(f"  [INFO] Feature '{col}': {null_count} nulls filled with median")
+            available.append(col)
+
     # One-hot encode position (drop MF as reference category)
     pos_dummies = pd.get_dummies(df[POSITION_COL], prefix="pos", drop_first=False)
     pos_dummies = pos_dummies.drop(columns=["pos_MF"], errors="ignore")
 
-    X = pd.concat([df[FEATURE_COLS], pos_dummies], axis=1).astype(float)
+    X = pd.concat([df[available], pos_dummies], axis=1).astype(float)
     y = df[TARGET_COL].values
 
     print(f"Feature matrix: {X.shape}  (features: {list(X.columns)})")
@@ -333,14 +360,22 @@ def main() -> None:
     xgb = train_xgboost(X_train, y_train)
     xgb_metrics = evaluate("XGBoost (test set)", y_test, xgb.predict(X_test))
 
-    # ── Compare ───────────────────────────────────────────────────────────────
+    # ── Compare (vs each other and vs baseline) ───────────────────────────────
     print("\n── Model comparison ─────────────────────────────────────────")
-    header = f"{'Model':<30} {'R²':>8} {'RMSE(log)':>12} {'RMSE(EUR)':>15}"
+    header = f"{'Model':<34} {'R²':>8} {'ΔR² vs base':>13} {'RMSE(EUR)':>14} {'ΔRMSE vs base':>15}"
     print(header)
     print("-" * len(header))
     for m in (ridge_metrics, xgb_metrics):
-        print(f"  {m['model']:<28} {m['r2']:>8.4f} {m['rmse_log']:>12.4f} "
-              f"€{m['rmse_eur']/1e6:>12.2f}M")
+        dr2   = m["r2"]       - BASELINE_R2
+        drmse = m["rmse_eur"] - BASELINE_RMSE
+        print(f"  {m['model']:<32} {m['r2']:>8.4f} "
+              f"  {dr2:>+8.4f}     "
+              f"€{m['rmse_eur']/1e6:>10.2f}M "
+              f"  {drmse/1e6:>+8.2f}M")
+    print(f"  {'Baseline (7-feat XGBoost)':<32} {BASELINE_R2:>8.4f} "
+          f"  {'—':>8}     "
+          f"€{BASELINE_RMSE/1e6:>10.2f}M "
+          f"  {'—':>8}")
 
     if xgb_metrics["r2"] >= ridge_metrics["r2"]:
         winner, winner_name, loser_name = xgb, "XGBoost", "Ridge"
@@ -352,12 +387,9 @@ def main() -> None:
     print(f"\nWinner: {winner_name}  "
           f"(ΔR²={r2_delta:.4f}, ΔRMSE=€{rmse_delta/1e6:.2f}M vs {loser_name})")
 
-    if winner_name == "XGBoost":
-        print("Why: XGBoost captures non-linear age curves and position×goal-rate "
-              "interactions that Ridge's linear surface cannot model.")
-    else:
-        print("Why: With limited features the linear model generalises better — "
-              "XGBoost may be overfitting the small feature set.")
+    xgb_r2_gain = xgb_metrics["r2"] - BASELINE_R2
+    print(f"XGBoost vs baseline: ΔR²={xgb_r2_gain:+.4f}  "
+          f"({'improvement' if xgb_r2_gain > 0 else 'no improvement'} from 3 new shooting features)")
 
     # ── Feature importance (XGBoost) ──────────────────────────────────────────
     print("\n── XGBoost feature importances (gain) ───────────────────────")
