@@ -195,6 +195,56 @@ def train_xgboost(X_train: np.ndarray, y_train: np.ndarray) -> Pipeline:
     return search.best_estimator_
 
 
+# ── Post-prediction adjustment multipliers ────────────────────────────────────
+
+def _age_multiplier(age: int) -> float:
+    """
+    Younger players command higher values due to sell-on potential
+    and longer peak years ahead.
+    """
+    if age <= 20:
+        return 1.50
+    if age <= 23:
+        return 1.25
+    if age <= 27:
+        return 1.00
+    if age <= 30:
+        return 0.85
+    return 0.70
+
+
+LEAGUE_MULTIPLIERS = {
+    "eng Premier League": 1.30,
+    "es La Liga":         1.20,
+    "de Bundesliga":      1.10,
+    "it Serie A":         1.05,
+    "fr Ligue 1":         1.00,
+}
+
+
+def apply_adjustments(out: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply age-potential and league-prestige multipliers sequentially to
+    predicted_value_eur, then recalculate value_gap_eur.
+
+    Adds:
+        age_multiplier        – factor from age bracket
+        league_multiplier     – factor from league prestige
+        adjustment_factor     – combined multiplier (age × league)
+        predicted_value_eur   – overwritten with adjusted value
+        value_gap_eur         – adjusted predicted − actual (EUR)
+    """
+    out["age_multiplier"]    = out["age"].apply(_age_multiplier)
+    out["league_multiplier"] = out["league"].map(LEAGUE_MULTIPLIERS).fillna(1.0)
+    out["adjustment_factor"] = (out["age_multiplier"] * out["league_multiplier"]).round(4)
+
+    # Apply sequentially: age first, then league (equivalent to one combined multiply)
+    raw_pred = out["predicted_value_eur"].copy()
+    out["predicted_value_eur"] = (raw_pred * out["adjustment_factor"]).round(0)
+    out["value_gap_eur"]       = (out["predicted_value_eur"] - out["market_value_in_eur"]).round(0)
+    return out
+
+
 # ── Prediction & output ───────────────────────────────────────────────────────
 
 def build_output(
@@ -204,46 +254,51 @@ def build_output(
     winner_name: str,
 ) -> pd.DataFrame:
     """
-    Attach predicted_value_eur and value_gap_eur to the matched DataFrame.
+    Generate raw XGBoost predictions, apply age-potential and league-prestige
+    multipliers, then attach all columns to the matched DataFrame.
 
-    value_gap_eur = predicted - actual  (positive → undervalued by market,
-                                         negative → overvalued by market)
+    value_gap_eur = adjusted predicted − actual
+        positive → model thinks player is undervalued
+        negative → model thinks player is overvalued
     """
-    log_preds = best_model.predict(X)
+    log_preds     = best_model.predict(X)
     predicted_eur = np.expm1(log_preds)
 
     out = df.copy()
     out["predicted_value_eur"] = predicted_eur.round(0)
-    out["value_gap_eur"]       = (predicted_eur - out["market_value_in_eur"]).round(0)
     out["model_used"]          = winner_name
+
+    out = apply_adjustments(out)
     return out
 
 
 def print_top_players(df: pd.DataFrame, n: int = 10) -> None:
     cols = ["player", "team", "league", "position_group", "age",
-            "minutes_played", "market_value_in_eur",
+            "adjustment_factor", "market_value_in_eur",
             "predicted_value_eur", "value_gap_eur"]
     cols = [c for c in cols if c in df.columns]
 
     def _fmt(val):
         return f"€{val/1e6:.1f}M"
 
-    print(f"\n{'─'*70}")
-    print(f"TOP {n} MOST UNDERVALUED  (model thinks they're worth more)")
-    print(f"{'─'*70}")
+    print(f"\n{'─'*80}")
+    print(f"TOP {n} MOST UNDERVALUED  (after age + league adjustments)")
+    print(f"{'─'*80}")
     under = df.nlargest(n, "value_gap_eur")[cols].copy()
     for _, row in under.iterrows():
-        print(f"  {row['player']:<28} {row['team']:<22} "
+        adj = f"  adj={row['adjustment_factor']:.2f}x" if "adjustment_factor" in row else ""
+        print(f"  {row['player']:<28} {row['team']:<22} age={int(row['age'])}{adj}  "
               f"actual={_fmt(row['market_value_in_eur'])}  "
               f"predicted={_fmt(row['predicted_value_eur'])}  "
               f"gap={_fmt(row['value_gap_eur'])}")
 
-    print(f"\n{'─'*70}")
-    print(f"TOP {n} MOST OVERVALUED   (model thinks they're worth less)")
-    print(f"{'─'*70}")
+    print(f"\n{'─'*80}")
+    print(f"TOP {n} MOST OVERVALUED   (after age + league adjustments)")
+    print(f"{'─'*80}")
     over = df.nsmallest(n, "value_gap_eur")[cols].copy()
     for _, row in over.iterrows():
-        print(f"  {row['player']:<28} {row['team']:<22} "
+        adj = f"  adj={row['adjustment_factor']:.2f}x" if "adjustment_factor" in row else ""
+        print(f"  {row['player']:<28} {row['team']:<22} age={int(row['age'])}{adj}  "
               f"actual={_fmt(row['market_value_in_eur'])}  "
               f"predicted={_fmt(row['predicted_value_eur'])}  "
               f"gap={_fmt(row['value_gap_eur'])}")
