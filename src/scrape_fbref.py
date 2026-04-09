@@ -1,233 +1,211 @@
 """
-scrape_fbref.py
+scrape_fbref.py — Pull player-level stats from FBref via soccerdata.
 
-Loads locally saved FBref CSV exports from data/raw/ and returns a single
-clean DataFrame of per-90 stats for outfield players across the Big 5 leagues.
+Fetches multiple stat tables (standard, shooting, passing, possession,
+defense, misc) for the Big 5 European Leagues and merges them into a
+single DataFrame. Saves to data/raw/fbref_stats_SEASON.csv.
 
-Expected files in data/raw/:
-    fbref_standard_2324.csv   – playing time, goals, assists, cards
-    fbref_defense_2324.csv    – tackles won, interceptions (only populated cols)
-
-Notes on data availability
---------------------------
-FBref CSV exports use a two-row header.  Row 0 carries section labels (blank
-in the export); row 1 holds the actual column names.  Duplicate stat names
-(e.g. "Gls" appears as both raw count and per-90) are disambiguated by pandas
-as "Gls" and "Gls.1" etc.
-
-The passing and possession CSV exports from this FBref page contained no
-stat data beyond identity columns — only the standard and defense tables had
-usable content.  Stats not available from these exports:
-
-    xG, xAG          – need the "Expected Goals" FBref export (separate tab)
-    Pressures         – need the "Defensive Actions" FBref export
-    Progressive passes / carries counts – need dedicated passing/possession
-                        exports; PrgP and PrgC columns were blank in the
-                        exports provided.
-
-Re-download those tabs from FBref and call fetch_fbref_stats() once those
-files are in data/raw/ to include those features automatically.
+Usage:
+    python src/scrape_fbref.py                  # default: 2024-25
+    python src/scrape_fbref.py --season 2324    # specific season
 """
 
-from pathlib import Path
-from typing import Optional, List
-
+import argparse
+import os
+import time
 import pandas as pd
+import soccerdata as sd
 
-RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
-PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
+# ── Configuration ────────────────────────────────────────────────────
+STAT_TYPES = [
+    "standard",
+    "shooting",
+    "passing",
+    "possession",
+    "defense",
+    "misc",
+]
 
-MIN_MINUTES = 900
-
-# ── Column rename maps ────────────────────────────────────────────────────────
-# FBref exports per-90 duplicates with ".1" suffixes after pandas deduplication.
-
-STANDARD_RENAME = {
-    "Rk\n▲":  "rk",
-    "Player":  "player",
-    "Nation":  "nation",
-    "Pos":     "position",
-    "Squad":   "team",
-    "Comp":    "league",
-    "Age":     "age",
-    "Born":    "birth_year",
-    "MP":      "matches_played",
-    "Starts":  "starts",
-    "Min":     "minutes_played",
-    "90s":     "minutes_90s",
-    # counting stats
-    "Gls":     "goals",
-    "Ast":     "assists",
-    "G+A":     "goals_assists",
-    "G-PK":    "goals_non_pen",
-    "PK":      "pen_scored",
-    "PKatt":   "pen_attempted",
-    "CrdY":    "yellow_cards",
-    "CrdR":    "red_cards",
-    # per-90 stats (pandas adds ".1" to deduplicate repeated column names)
-    "Gls.1":   "goals_p90",
-    "Ast.1":   "assists_p90",
-    "G+A.1":   "goals_assists_p90",
-    "G-PK.1":  "goals_non_pen_p90",
-    "G+A-PK":  "goals_assists_non_pen_p90",
-    "Matches": "_drop",
+# Columns to keep from each stat table (per-90 where available)
+COLUMNS_TO_KEEP = {
+    "standard": [
+        "player", "nation", "pos", "squad", "comp", "age", "born",
+        "minutes_90s",       # 90-minute units played
+        "goals_per90", "assists_per90",
+        "goals_assists_per90",
+        "goals_pens_per90",  # non-penalty goals per 90
+        "xg_per90", "xg_assist_per90",  # xG and xAG per 90
+        "npxg_per90",        # non-penalty xG per 90
+        "minutes",
+    ],
+    "shooting": [
+        "player", "squad",
+        "shots_per90", "shots_on_target_per90",
+        "goals_per_shot", "goals_per_shot_on_target",
+        "npxg_per_shot",
+        "xg_net_per90",      # xG overperformance
+    ],
+    "passing": [
+        "player", "squad",
+        "passes_completed", "passes", "passes_pct",
+        "progressive_passes",
+        "passes_into_final_third",
+        "passes_into_penalty_area",
+        "assisted_shots",    # key passes
+    ],
+    "possession": [
+        "player", "squad",
+        "progressive_carries",
+        "carries_into_final_third",
+        "carries_into_penalty_area",
+        "successful_dribbles", "dribbles",
+        "progressive_passes_received",
+    ],
+    "defense": [
+        "player", "squad",
+        "tackles_won", "tackles",
+        "interceptions",
+        "blocks",
+        "clearances",
+        "aerials_won", "aerials_lost",
+    ],
+    "misc": [
+        "player", "squad",
+        "fouls", "fouled",
+        "offsides",
+        "ball_recoveries",
+    ],
 }
 
-DEFENSE_RENAME = {
-    "Rk":      "rk",
-    "Player":  "player",
-    "Nation":  "nation",
-    "Pos":     "position",
-    "Squad":   "team",
-    "Comp":    "league",
-    "Age":     "age",
-    "Born":    "birth_year",
-    "90s":     "minutes_90s",
-    # only these two columns have data in the exported CSV
-    "TklW":    "tackles_won",
-    "Int":     "interceptions",
-    # remaining cols are blank in the export — still rename to avoid collisions
-    "Tkl":     "_tkl_raw",
-    "Def 3rd": "_tkl_def3",
-    "Mid 3rd": "_tkl_mid3",
-    "Att 3rd": "_tkl_att3",
-    "Tkl.1":   "_drib_tkl",
-    "Att":     "_drib_att",
-    "Tkl%":    "_drib_tkl_pct",
-    "Lost":    "_drib_lost",
-    "Blocks":  "_blocks",
-    "Sh":      "_shots_blk",
-    "Pass":    "_passes_blk",
-    "Tkl+Int": "_tkl_int",
-    "Clr":     "_clearances",
-    "Err":     "_errors",
-    "Matches": "_drop",
-}
-
-JOIN_KEYS = ["player", "team", "league"]
+# ── Helper: safe column select ───────────────────────────────────────
+def safe_select(df: pd.DataFrame, wanted: list[str]) -> pd.DataFrame:
+    """Select columns that exist, silently skip missing ones."""
+    available = [c for c in wanted if c in df.columns]
+    missing = set(wanted) - set(available)
+    if missing:
+        print(f"  ⚠  Missing columns (skipped): {missing}")
+    return df[available]
 
 
-# ── Table loader ──────────────────────────────────────────────────────────────
-
-def _load_table(path: Path, rename: dict) -> pd.DataFrame:
+# ── Main scraper ─────────────────────────────────────────────────────
+def scrape_fbref(season: str = "2425") -> pd.DataFrame:
     """
-    Read one FBref CSV export (two-row header), strip repeated header rows,
-    apply column renames, and coerce numeric types.
-    """
-    df = pd.read_csv(path, header=1, dtype=str)
-
-    # Drop rows where the rank column contains the literal text 'Rk'
-    rk_col = df.columns[0]
-    df = df[df[rk_col] != "Rk"].copy()
-
-    # Drop rows without a player name
-    if "Player" in df.columns:
-        df = df[df["Player"].notna() & (df["Player"].str.strip() != "")].copy()
-
-    df = df.rename(columns=rename)
-
-    # Remove flagged columns
-    df = df.drop(columns=[c for c in df.columns if c.startswith("_drop")
-                           or (c.startswith("_") and c != "_drop")], errors="ignore")
-
-    # Strip whitespace from string columns
-    str_cols = {"player", "nation", "position", "team", "league"}
-    for col in df.select_dtypes("object").columns:
-        df[col] = df[col].str.strip()
-
-    # Coerce non-string columns to numeric
-    for col in df.columns:
-        if col not in str_cols:
-            df[col] = pd.to_numeric(
-                df[col].astype(str).str.replace(",", "", regex=False),
-                errors="coerce",
-            )
-
-    return df.reset_index(drop=True)
-
-
-# ── Main loader ───────────────────────────────────────────────────────────────
-
-def fetch_fbref_stats(
-    season_slug: str = "2324",
-    leagues: Optional[List[str]] = None,
-    min_minutes: int = MIN_MINUTES,
-) -> pd.DataFrame:
-    """
-    Load and merge the FBref standard and defense CSV exports.
+    Pull all stat tables for Big 5 leagues from FBref and merge.
 
     Parameters
     ----------
-    season_slug : str
-        Filename suffix, e.g. "2324" for 2023-24.
-    leagues : list of str, optional
-        League name substrings to keep (e.g. ["Premier League"]).
-        Pass None to return all Big 5 leagues.
-    min_minutes : int
-        Minimum minutes played filter.
+    season : str
+        Season identifier, e.g. "2425" for 2024-25.
 
     Returns
     -------
     pd.DataFrame
-        One row per player–team combination with all available stats.
+        One row per player with all stats merged.
     """
-    std_path = RAW_DIR / f"fbref_standard_{season_slug}.csv"
-    def_path = RAW_DIR / f"fbref_defense_{season_slug}.csv"
+    print(f"📡 Fetching FBref data for season {season}...")
+    print("   (First run may take a few minutes — data is cached after.)\n")
 
-    for p in (std_path, def_path):
-        if not p.exists():
-            raise FileNotFoundError(f"Expected file not found: {p}")
+    fbref = sd.FBref(
+        leagues="Big 5 European Leagues Combined",
+        seasons=season,
+    )
 
-    std = _load_table(std_path, STANDARD_RENAME)
-    dfn = _load_table(def_path, DEFENSE_RENAME)
+    merged = None
 
-    # Carry only the two populated defense columns
-    def_cols = JOIN_KEYS + [c for c in ("tackles_won", "interceptions")
-                             if c in dfn.columns]
-    merged = std.merge(dfn[def_cols], on=JOIN_KEYS, how="left")
+    for stat in STAT_TYPES:
+        print(f"  → Fetching: {stat}...")
+        try:
+            df = fbref.read_player_season_stats(stat_type=stat)
+            df = df.reset_index()
 
-    # ── Filters ───────────────────────────────────────────────────────────────
-    if leagues:
-        pattern = "|".join(leagues)
+            # Flatten multi-level column names if present
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = ["_".join(str(c) for c in col).strip("_")
+                              for col in df.columns]
+
+            # Lowercase all column names for consistency
+            df.columns = [c.lower().replace(" ", "_") for c in df.columns]
+
+            print(f"    ✓ {len(df)} rows, {len(df.columns)} columns")
+
+            if merged is None:
+                merged = df
+            else:
+                # Merge on player + squad to avoid duplicate columns
+                merge_keys = ["player", "squad"]
+                # Drop columns from right df that already exist (except keys)
+                existing_cols = set(merged.columns) - set(merge_keys)
+                new_cols = [c for c in df.columns
+                            if c not in existing_cols or c in merge_keys]
+                merged = merged.merge(
+                    df[new_cols],
+                    on=merge_keys,
+                    how="outer",
+                    suffixes=("", f"_{stat}"),
+                )
+
+            # Be polite to FBref
+            time.sleep(4)
+
+        except Exception as e:
+            print(f"    ✗ Error fetching {stat}: {e}")
+            continue
+
+    if merged is None:
+        raise RuntimeError("Failed to fetch any stat tables from FBref.")
+
+    # ── Filter: outfield players with ≥900 minutes ──────────────────
+    min_col = None
+    for candidate in ["minutes", "minutes_90s", "min"]:
+        if candidate in merged.columns:
+            min_col = candidate
+            break
+
+    if min_col and min_col != "minutes":
+        # Convert 90s-based to total minutes
+        if "90" in min_col:
+            merged["minutes"] = pd.to_numeric(
+                merged[min_col], errors="coerce"
+            ) * 90
+        else:
+            merged["minutes"] = pd.to_numeric(
+                merged[min_col], errors="coerce"
+            )
+
+    if "minutes" in merged.columns:
+        before = len(merged)
         merged = merged[
-            merged["league"].str.contains(pattern, case=False, na=False)
-        ].copy()
+            pd.to_numeric(merged["minutes"], errors="coerce") >= 900
+        ]
+        print(f"\n  🔽 Filtered ≥900 min: {before} → {len(merged)} players")
 
-    if "minutes_played" in merged.columns:
-        merged = merged[merged["minutes_played"] >= min_minutes].copy()
+    # Drop goalkeepers
+    if "pos" in merged.columns:
+        before = len(merged)
+        merged = merged[~merged["pos"].str.contains("GK", na=False)]
+        print(f"  🔽 Dropped GKs: {before} → {len(merged)} players")
 
-    # ── Per-90 rates for defense stats (standard per-90s already provided) ───
-    if "minutes_90s" in merged.columns:
-        for col in ("tackles_won", "interceptions"):
-            if col in merged.columns:
-                merged[f"{col}_p90"] = (merged[col] / merged["minutes_90s"]).round(3)
-
-    return merged.sort_values(["league", "player"]).reset_index(drop=True)
+    print(f"\n✅ Final dataset: {len(merged)} players, {len(merged.columns)} features")
+    return merged
 
 
-# ── I/O ───────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="Scrape FBref player stats")
+    parser.add_argument(
+        "--season", default="2425",
+        help='Season code, e.g. "2425" for 2024-25 (default: 2425)'
+    )
+    args = parser.parse_args()
 
-def save(df: pd.DataFrame, season_slug: str = "2324") -> None:
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    df = scrape_fbref(season=args.season)
 
-    raw_out = RAW_DIR / f"fbref_merged_{season_slug}.csv"
-    df.to_csv(raw_out, index=False)
-    print(f"Saved merged FBref → {raw_out}  ({len(df)} rows, {len(df.columns)} cols)")
-
-    p90_cols = sorted(c for c in df.columns if c.endswith("_p90"))
-    id_cols  = ["league", "player", "team", "position", "age", "minutes_played"]
-    keep     = [c for c in id_cols + p90_cols if c in df.columns]
-    proc_out = PROCESSED_DIR / f"fbref_per90_{season_slug}.csv"
-    df[keep].to_csv(proc_out, index=False)
-    print(f"Saved per-90 subset → {proc_out}")
+    # Save
+    out_dir = os.path.join(os.path.dirname(__file__), "..", "data", "raw")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"fbref_stats_{args.season}.csv")
+    df.to_csv(out_path, index=False)
+    print(f"💾 Saved to {out_path}")
 
 
 if __name__ == "__main__":
-    df = fetch_fbref_stats()
-    save(df)
-    p90_cols = [c for c in df.columns if c.endswith("_p90")]
-    display  = ["league", "player", "team", "position", "minutes_played"] + p90_cols
-    print("\n", df[[c for c in display if c in df.columns]].head(20).to_string(index=False))
-    print(f"\nTotal qualifying players : {len(df)}")
-    print(f"Columns ({len(df.columns)})          : {list(df.columns)}")
+    main()
