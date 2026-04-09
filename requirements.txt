@@ -1,11 +1,22 @@
-pandas>=2.0.0
-numpy>=1.26.0
-scikit-learn>=1.3.0
-xgboost>=2.0.0
-plotly>=5.18.0
-streamlit>=1.30.0
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-lxml>=5.0.0
-openpyxl>=3.1.0
-python-dotenv>=1.0.0
+# Core
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+
+# Model
+xgboost>=2.0
+shap>=0.43
+
+# Data sources
+soccerdata>=1.6
+
+# Name matching
+rapidfuzz>=3.0
+
+# Dashboard
+streamlit>=1.28
+plotly>=5.18
+
+# Utilities
+requests>=2.31
+beautifulsoup4>=4.12
