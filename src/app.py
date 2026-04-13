@@ -319,6 +319,41 @@ if filtered.empty:
     st.stop()
 
 
+# ── Helper: fallback search for AI Scout ─────────────────────────────
+def _fallback_search(query: str, data: pd.DataFrame):
+    """Keyword-based fallback when AI is unavailable."""
+    q = query.lower()
+    result = data.copy()
+    if any(w in q for w in ["forward", "striker", "winger", "fw"]):
+        result = result[result["position_group"] == "FW"]
+    elif any(w in q for w in ["midfielder", "mid", "mf"]):
+        result = result[result["position_group"] == "MF"]
+    elif any(w in q for w in ["defender", "back", "cb", "df"]):
+        result = result[result["position_group"] == "DF"]
+    for league in ["premier league", "la liga", "bundesliga", "serie a", "ligue 1"]:
+        if league in q:
+            result = result[result["league_label"].str.lower() == league]
+    age_match = re.search(r'under (\d+)', q)
+    if age_match:
+        result = result[result["age"] <= int(age_match.group(1))]
+    budget_match = re.search(r'€(\d+)m|(\d+)m budget|under (\d+)\s*m', q)
+    if budget_match:
+        budget = int(next(g for g in budget_match.groups() if g))
+        result = result[result["actual_m"] <= budget]
+    if "overvalued" not in q:
+        result = result[result["gap_m"] > 0]
+    result = result.sort_values("gap_m", ascending=False).head(10)
+    if result.empty:
+        st.warning("No players match your criteria.")
+    else:
+        show = result[["player", "squad", "position_group", "age",
+                        "actual_m", "predicted_m", "gap_m"]].copy()
+        show.columns = ["Player", "Club", "Pos", "Age",
+                        "Price (€M)", "Model Value (€M)", "Gap (€M)"]
+        show.index = range(1, len(show) + 1)
+        st.dataframe(show, use_container_width=True)
+
+
 # ── Tabs ─────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Overview", "🔍 Transfer Finder", "⚔️ Compare",
@@ -820,38 +855,6 @@ Answer with specific player recommendations."""
                 _fallback_search(scout_query, filtered)
 
 
-def _fallback_search(query: str, data: pd.DataFrame):
-    """Keyword-based fallback when AI is unavailable."""
-    q = query.lower()
-    result = data.copy()
-    if any(w in q for w in ["forward", "striker", "winger", "fw"]):
-        result = result[result["position_group"] == "FW"]
-    elif any(w in q for w in ["midfielder", "mid", "mf"]):
-        result = result[result["position_group"] == "MF"]
-    elif any(w in q for w in ["defender", "back", "cb", "df"]):
-        result = result[result["position_group"] == "DF"]
-    for league in ["premier league", "la liga", "bundesliga", "serie a", "ligue 1"]:
-        if league in q:
-            result = result[result["league_label"].str.lower() == league]
-    age_match = re.search(r'under (\d+)', q)
-    if age_match:
-        result = result[result["age"] <= int(age_match.group(1))]
-    budget_match = re.search(r'€(\d+)m|(\d+)m budget|under (\d+)\s*m', q)
-    if budget_match:
-        budget = int(next(g for g in budget_match.groups() if g))
-        result = result[result["actual_m"] <= budget]
-    if "overvalued" not in q:
-        result = result[result["gap_m"] > 0]
-    result = result.sort_values("gap_m", ascending=False).head(10)
-    if result.empty:
-        st.warning("No players match your criteria.")
-    else:
-        show = result[["player", "squad", "position_group", "age",
-                        "actual_m", "predicted_m", "gap_m"]].copy()
-        show.columns = ["Player", "Club", "Pos", "Age",
-                        "Price (€M)", "Model Value (€M)", "Gap (€M)"]
-        show.index = range(1, len(show) + 1)
-        st.dataframe(show, use_container_width=True)
 
 
 # ═══════════════════════════════════════════════════════════════════
