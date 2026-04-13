@@ -4,3 +4,7 @@ __pycache__/
 *.dylib
 *.so
 .DS_Store
+.env
+*.egg-info/
+dist/
+build/
