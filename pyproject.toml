@@ -1,0 +1,7 @@
+[project]
+name = "soccer-transfer-valuation"
+version = "4.0.0"
+description = "ML-powered soccer transfer valuation model"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Aariv Gupta"}]
