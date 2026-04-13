@@ -1,443 +1,648 @@
 """
-app.py — Soccer Transfer Market Valuation Dashboard
+app.py — Soccer Transfer Market Valuation Dashboard (V3 — Final)
+
+Features:
+  - Interactive scatter plot with hover details
+  - Under/Overvalued leaderboards
+  - Player search with photo, confidence interval, stat card
+  - Transfer Recommendation Engine (position + budget + age)
+  - Player comparison with radar charts + photos
+  - League-level analysis (avg under/overvaluation by league)
+  - SHAP explainability + value gap distribution
+  - CSV export for filtered results
+  - Historical value trends per player
+  - Last-updated timestamp
 
 Run with:
     streamlit run src/app.py
 """
 
 from pathlib import Path
-
+from datetime import datetime
+import json
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# ── Page config (must be first Streamlit call) ────────────────────────────────
-
+# ── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
     layout="wide",
     page_title="Soccer Transfer Valuation",
     page_icon="⚽",
 )
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Constants ────────────────────────────────────────────────────────
+BASE_DIR = Path(__file__).resolve().parents[1]
+PROCESSED_DIR = BASE_DIR / "data" / "processed"
+RAW_DIR = BASE_DIR / "data" / "raw"
 
-DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "processed" / "model_output_2324.csv"
+# Auto-detect season
+if (PROCESSED_DIR / "model_output_2526.csv").exists():
+    DATA_PATH = PROCESSED_DIR / "model_output_2526.csv"
+    SEASON = "2025-26"
+elif (PROCESSED_DIR / "model_output_2324.csv").exists():
+    DATA_PATH = PROCESSED_DIR / "model_output_2324.csv"
+    SEASON = "2023-24"
+else:
+    DATA_PATH = None
+    SEASON = "Unknown"
+
+METRICS_PATH = PROCESSED_DIR / "model_metrics.json"
+VALUATIONS_PATH = RAW_DIR / "player_valuations.csv"
 
 LEAGUE_COLORS = {
-    "eng Premier League": "#3d195b",
-    "es La Liga":         "#ee8707",
-    "de Bundesliga":      "#d3010c",
-    "it Serie A":         "#1a56db",
-    "fr Ligue 1":         "#1e4d2b",
+    "Premier League": "#3d195b",
+    "La Liga":        "#ee8707",
+    "Bundesliga":     "#d3010c",
+    "Serie A":        "#1a56db",
+    "Ligue 1":        "#1e4d2b",
 }
 
-LEAGUE_LABELS = {
-    "eng Premier League": "Premier League",
-    "es La Liga":         "La Liga",
-    "de Bundesliga":      "Bundesliga",
-    "it Serie A":         "Serie A",
-    "fr Ligue 1":         "Ligue 1",
+POSITION_LABELS = {"FW": "Forward", "MF": "Midfielder", "DF": "Defender"}
+
+RADAR_STATS = {
+    "FW": {
+        "goals_per90": "Goals",
+        "xg_per90": "xG",
+        "assists_per90": "Assists",
+        "shots_on_target_per90": "Shots OT",
+        "progressive_carries_per90": "Prog Carries",
+        "successful_dribbles_per90": "Dribbles",
+    },
+    "MF": {
+        "goals_per90": "Goals",
+        "assists_per90": "Assists",
+        "progressive_passes_per90": "Prog Passes",
+        "progressive_carries_per90": "Prog Carries",
+        "key_passes_per90": "Key Passes",
+        "tackles_won_per90": "Tackles",
+    },
+    "DF": {
+        "tackles_won_per90": "Tackles",
+        "interceptions_per90": "Interceptions",
+        "aerials_won_per90": "Aerials",
+        "progressive_passes_per90": "Prog Passes",
+        "progressive_carries_per90": "Prog Carries",
+        "goals_per90": "Goals",
+    },
 }
 
-# Feature importances from trained XGBoost model (hardcoded — model not re-run)
-FEATURE_IMPORTANCES = {
-    "Age":                    0.307696,
-    "Goals (non-pen) p90":    0.151258,
-    "Goals p90":              0.137338,
-    "Minutes Played":         0.123635,
-    "Assists p90":            0.117250,
-    "Tackles Won p90":        0.048869,
-    "Position: Defender":     0.044598,
-    "Interceptions p90":      0.035768,
-    "Position: Forward":      0.033587,
-}
+BG = "#0e1117"
+CARD = "#1a1d24"
 
-STAT_DISPLAY = {
-    "goals_p90":           "Goals / 90",
-    "assists_p90":         "Assists / 90",
-    "goals_non_pen_p90":   "Non-Pen Goals / 90",
-    "goal_inv_p90":        "Goal Involvement / 90",
-    "tackles_won_p90":     "Tackles Won / 90",
-    "interceptions_p90":   "Interceptions / 90",
-    "minutes_played":      "Minutes Played",
-    "age":                 "Age",
-}
 
-# ── Data loading ──────────────────────────────────────────────────────────────
-
+# ── Data loading ─────────────────────────────────────────────────────
 @st.cache_data
 def load_data() -> pd.DataFrame:
+    if DATA_PATH is None:
+        return pd.DataFrame()
     df = pd.read_csv(DATA_PATH)
-
-    # EUR → €M for display
-    df["actual_m"]    = (df["market_value_in_eur"]  / 1e6).round(1)
-    df["predicted_m"] = (df["predicted_value_eur"]   / 1e6).round(1)
-    df["gap_m"]       = (df["value_gap_eur"]          / 1e6).round(1)
-
-    # Friendly league label used in legends / tables
-    df["league_label"] = df["league"].map(LEAGUE_LABELS)
-
-    # Undervaluation rank (1 = most undervalued)
-    df["underval_rank"] = df["value_gap_eur"].rank(ascending=False).astype(int)
-
+    for src, dst in [("market_value_eur", "actual_m"),
+                     ("predicted_value_eur", "predicted_m"),
+                     ("value_gap_eur", "gap_m")]:
+        if src in df.columns:
+            df[dst] = (df[src] / 1e6).round(1)
+    for c in ["predicted_value_lower", "predicted_value_upper"]:
+        if c in df.columns:
+            df[c + "_m"] = (df[c] / 1e6).round(1)
+    if "tm_highest_market_value_in_eur" in df.columns:
+        df["peak_m"] = (pd.to_numeric(df["tm_highest_market_value_in_eur"],
+                                       errors="coerce") / 1e6).round(1)
+    if "league_name" in df.columns:
+        df["league_label"] = df["league_name"]
+    elif "comp" in df.columns:
+        df["league_label"] = df["comp"]
+    if "position_group" not in df.columns and "pos" in df.columns:
+        pos = df["pos"].astype(str).str.upper()
+        df["position_group"] = "MF"
+        df.loc[pos.str.contains("FW"), "position_group"] = "FW"
+        df.loc[pos.str.contains("DF"), "position_group"] = "DF"
     return df
 
 
-df_all = load_data()
+@st.cache_data
+def load_metrics() -> dict:
+    if METRICS_PATH.exists():
+        with open(METRICS_PATH) as f:
+            return json.load(f)
+    return {}
 
-# ── Sidebar filters ───────────────────────────────────────────────────────────
 
-with st.sidebar:
-    st.header("Filters")
+@st.cache_data
+def load_valuations_history() -> pd.DataFrame:
+    if VALUATIONS_PATH.exists():
+        v = pd.read_csv(VALUATIONS_PATH)
+        v["date"] = pd.to_datetime(v["date"], errors="coerce")
+        v["value_m"] = (pd.to_numeric(v["market_value_in_eur"],
+                                       errors="coerce") / 1e6).round(1)
+        return v
+    return pd.DataFrame()
 
-    selected_leagues = st.multiselect(
-        "League",
-        options=list(LEAGUE_LABELS.values()),
-        default=list(LEAGUE_LABELS.values()),
-    )
 
-    selected_positions = st.multiselect(
-        "Position",
-        options=["FW", "MF", "DF"],
-        default=["FW", "MF", "DF"],
-    )
+df = load_data()
+metrics = load_metrics()
+val_history = load_valuations_history()
 
-    min_minutes = st.slider(
-        "Minimum Minutes Played",
-        min_value=900,
-        max_value=3000,
-        value=900,
-        step=50,
-    )
-
-    age_range = st.slider(
-        "Age Range",
-        min_value=16,
-        max_value=40,
-        value=(16, 40),
-    )
-
-    # Apply filters
-    mask = (
-        df_all["league_label"].isin(selected_leagues)
-        & df_all["position_group"].isin(selected_positions)
-        & (df_all["minutes_played"] >= min_minutes)
-        & df_all["age"].between(age_range[0], age_range[1])
-    )
-    df = df_all[mask].copy()
-
-    st.divider()
-    st.metric("Players shown", len(df))
-    st.caption(f"of {len(df_all)} total matched players")
-    st.caption("Data: FBref + Transfermarkt 2023-24 season")
-
-# ── Header ────────────────────────────────────────────────────────────────────
-
-st.title("⚽ Soccer Transfer Market Valuation Model")
-st.markdown(
-    "Comparing **predicted vs actual** Transfermarkt market values "
-    "across the Big 5 European leagues using **XGBoost**"
-)
-st.info(
-    "Model uses 11 features including performance stats, contract length, age, and league. "
-    "Predictions are adjusted for age potential and league prestige. "
-    "R² = 0.507 on holdout test set."
-)
-st.divider()
-
-# Guard: no data after filtering
 if df.empty:
-    st.warning("No players match the current filters. Adjust the sidebar.")
+    st.error("No data found. Run the pipeline first.")
     st.stop()
 
-# ── Section 1: Scatter plot ───────────────────────────────────────────────────
+model_weight = metrics.get("global", {}).get("model_weight", 0.65)
 
-st.subheader("Predicted vs Actual Market Value")
 
-# Build colour sequence aligned to the filtered leagues (preserves legend order)
-present_leagues = df["league_label"].unique().tolist()
-color_sequence  = [LEAGUE_COLORS[k] for k, v in LEAGUE_LABELS.items() if v in present_leagues]
+# ── CSS ──────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .main .block-container { padding-top: 1rem; max-width: 1400px; }
+    div[data-testid="stMetric"] {
+        background: #1a1d24; padding: 10px 14px;
+        border-radius: 8px; border: 1px solid #2a2d34;
+    }
+    div[data-testid="stMetric"] label { color: #9ca3af; font-size: 0.8rem; }
+    .player-card {
+        background: #1a1d24; border-radius: 12px;
+        padding: 20px; border: 1px solid #2a2d34;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-fig_scatter = px.scatter(
-    df,
-    x="actual_m",
-    y="predicted_m",
-    color="league_label",
-    color_discrete_sequence=color_sequence,
-    size="minutes_played",
-    size_max=16,
-    hover_name="player",
-    hover_data={
-        "team":          True,
-        "position_group": True,
-        "age":           True,
-        "actual_m":      ":.1f",
-        "predicted_m":   ":.1f",
-        "gap_m":         ":.1f",
-        "league_label":  False,
-        "minutes_played": False,
-    },
-    labels={
-        "actual_m":      "Actual Market Value (€M)",
-        "predicted_m":   "Predicted Market Value (€M)",
-        "league_label":  "League",
-        "team":          "Club",
-        "position_group":"Position",
-        "age":           "Age",
-        "gap_m":         "Gap (€M)",
-    },
-    title="Predicted vs Actual Market Value",
+
+# ── Header ───────────────────────────────────────────────────────────
+st.title("⚽ Soccer Transfer Valuation Model")
+st.caption(
+    f"Comparing predicted market values (from on-pitch stats) vs actual "
+    f"Transfermarkt valuations · **{SEASON}** · Big 5 European Leagues · "
+    f"**{len(df)}** players"
 )
 
-# Perfect prediction line
-max_val = max(df["actual_m"].max(), df["predicted_m"].max()) * 1.05
-fig_scatter.add_trace(go.Scatter(
-    x=[0, max_val],
-    y=[0, max_val],
-    mode="lines",
-    line=dict(color="#555555", width=1.5, dash="dash"),
-    name="Perfect prediction",
-    hoverinfo="skip",
-))
-
-fig_scatter.update_layout(
-    height=560,
-    margin=dict(l=20, r=20, t=50, b=20),
-    paper_bgcolor="#0e1117",
-    plot_bgcolor="#0e1117",
-    font=dict(family="Inter, Arial, sans-serif", color="#ffffff"),
-    legend=dict(title="League", orientation="v", x=1.01, y=1, font=dict(color="#ffffff")),
-    xaxis=dict(
-        title="Actual Market Value (€M)",
-        title_font=dict(color="#ffffff"),
-        tickfont=dict(color="#ffffff"),
-        gridcolor="#333333",
-        zerolinecolor="#333333",
-    ),
-    yaxis=dict(
-        title="Predicted Market Value (€M)",
-        title_font=dict(color="#ffffff"),
-        tickfont=dict(color="#ffffff"),
-        gridcolor="#333333",
-        zerolinecolor="#333333",
-    ),
-)
-fig_scatter.update_traces(
-    marker=dict(opacity=0.75, line=dict(width=0.4, color="#0e1117")),
-    selector=dict(mode="markers"),
-)
-
-st.plotly_chart(fig_scatter, use_container_width=True)
-
-st.divider()
-
-# ── Section 2: Leaderboards ───────────────────────────────────────────────────
-
-st.subheader("Player Leaderboards")
-
-TABLE_COLS_RAW = ["player", "league_label", "team", "age",
-                  "actual_m", "predicted_m", "gap_m",
-                  "contract_years_remaining", "adjustment_factor"]
-TABLE_HEADERS  = {
-    "player":                    "Player",
-    "league_label":              "League",
-    "team":                      "Club",
-    "age":                       "Age",
-    "actual_m":                  "Actual (€M)",
-    "predicted_m":               "Predicted (€M)",
-    "gap_m":                     "Gap (€M)",
-    "contract_years_remaining":  "Contract Yrs",
-    "adjustment_factor":         "Adj Factor",
-}
+# Last updated
+if DATA_PATH and DATA_PATH.exists():
+    mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
+    st.caption(f"📅 Last updated: {mod_time.strftime('%B %d, %Y')}")
 
 
-def _fmt_gap(val: float) -> str:
-    sign = "+" if val >= 0 else ""
-    return f"{sign}{val:.1f}"
+# ── Sidebar ──────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("Filters")
+    all_leagues = sorted(df["league_label"].dropna().unique().tolist())
+    selected_leagues = st.multiselect("League", all_leagues, default=all_leagues)
 
-
-def _style_gap(col: pd.Series, positive_is_good: bool) -> list[str]:
-    styles = []
-    for v in col:
-        if positive_is_good:
-            color = "color: #16a34a; font-weight:600" if v > 0 else "color: #dc2626; font-weight:600"
-        else:
-            color = "color: #dc2626; font-weight:600" if v < 0 else "color: #16a34a; font-weight:600"
-        styles.append(color)
-    return styles
-
-
-col_under, col_over = st.columns(2)
-
-def _build_leaderboard(source: pd.DataFrame) -> pd.DataFrame:
-    """Round new columns and apply header renames for a leaderboard table."""
-    tbl = source[TABLE_COLS_RAW].copy()
-    tbl["contract_years_remaining"] = tbl["contract_years_remaining"].round(1)
-    tbl["adjustment_factor"]        = tbl["adjustment_factor"].round(2)
-    tbl = tbl.rename(columns=TABLE_HEADERS).reset_index(drop=True)
-    tbl.index = tbl.index + 1
-    tbl["Gap (€M)"] = tbl["Gap (€M)"].apply(_fmt_gap)
-    return tbl
-
-
-with col_under:
-    st.markdown("### 🟢 Most Undervalued Players")
-    st.caption("Model predicts a higher value than Transfermarkt")
-    top_under = _build_leaderboard(df.nlargest(15, "gap_m"))
-    st.dataframe(
-        top_under.style.apply(
-            lambda col: _style_gap(
-                top_under["Gap (€M)"].str.replace("+", "", regex=False).astype(float),
-                positive_is_good=True,
-            ),
-            subset=["Gap (€M)"],
-        ),
-        use_container_width=True,
-        height=490,
+    all_positions = sorted(df["position_group"].dropna().unique().tolist())
+    selected_positions = st.multiselect(
+        "Position", all_positions, default=all_positions,
+        format_func=lambda x: POSITION_LABELS.get(x, x),
     )
 
-with col_over:
-    st.markdown("### 🔴 Most Overvalued Players")
-    st.caption("Model predicts a lower value than Transfermarkt")
-    top_over = _build_leaderboard(df.nsmallest(15, "gap_m"))
-    st.dataframe(
-        top_over.style.apply(
-            lambda col: _style_gap(
-                top_over["Gap (€M)"].str.replace("+", "", regex=False).astype(float),
-                positive_is_good=False,
-            ),
-            subset=["Gap (€M)"],
-        ),
-        use_container_width=True,
-        height=490,
-    )
+    age_min, age_max = int(df["age"].min()), int(df["age"].max())
+    age_range = st.slider("Age Range", age_min, age_max, (age_min, age_max))
 
-st.divider()
+    min_minutes = st.slider("Min. Minutes Played", 900,
+                            int(df.get("minutes", pd.Series([3500])).max()),
+                            900, step=100) if "minutes" in df.columns else 900
 
-# ── Section 3: Player search ──────────────────────────────────────────────────
-
-st.subheader("Player Search")
-
-player_options = sorted(df["player"].unique().tolist())
-selected_player = st.selectbox(
-    "Search for a player",
-    options=["— select a player —"] + player_options,
-    index=0,
-)
-
-if selected_player != "— select a player —":
-    row = df[df["player"] == selected_player].iloc[0]
-
-    gap_eur  = row["value_gap_eur"]
-    gap_sign = "+" if gap_eur >= 0 else ""
-
-    # Metric cards
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric(
-        "Actual Value",
-        f"€{row['actual_m']:.1f}M",
-    )
-    m2.metric(
-        "Predicted Value",
-        f"€{row['predicted_m']:.1f}M",
-    )
-    m3.metric(
-        "Value Gap",
-        f"{gap_sign}€{abs(row['gap_m']):.1f}M",
-        delta=f"{gap_sign}{row['gap_m']:.1f}M vs actual",
-        delta_color="normal" if gap_eur >= 0 else "inverse",
-    )
-    m4.metric(
-        "Undervaluation Rank",
-        f"#{int(row['underval_rank'])}",
-        help="Rank 1 = most undervalued among all matched players",
-    )
-    contract_val = row.get("contract_years_remaining")
-    m5.metric(
-        "Contract Years Left",
-        f"{contract_val:.1f}" if pd.notna(contract_val) else "N/A",
-    )
-
-    # Player context
+    st.divider()
     st.caption(
-        f"**{row['position_group']}**  ·  {row['team']}  ·  "
-        f"{LEAGUE_LABELS.get(row['league'], row['league'])}  ·  "
-        f"Age {int(row['age'])}  ·  {int(row['minutes_played'])} min played"
+        f"Model: XGBoost\n\n"
+        f"Blended: {int(model_weight*100)}% model / "
+        f"{int((1-model_weight)*100)}% market\n\n"
+        f"Gap cap: ±60%"
     )
 
-    # Stat table
-    stat_rows = []
-    for col, label in STAT_DISPLAY.items():
-        val = row[col]
-        if col in ("minutes_played", "age"):
-            stat_rows.append({"Stat": label, "Value": f"{int(val)}"})
-        else:
-            stat_rows.append({"Stat": label, "Value": f"{val:.3f}"})
+# Apply filters
+mask = (df["league_label"].isin(selected_leagues) &
+        df["position_group"].isin(selected_positions))
+if "age" in df.columns:
+    mask &= df["age"].between(age_range[0], age_range[1])
+if "minutes" in df.columns:
+    mask &= df["minutes"] >= min_minutes
 
-    st.dataframe(
-        pd.DataFrame(stat_rows).set_index("Stat"),
-        use_container_width=False,
+filtered = df[mask].copy()
+if filtered.empty:
+    st.warning("No players match filters.")
+    st.stop()
+
+
+# ── Tabs ─────────────────────────────────────────────────────────────
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Overview", "🔍 Transfer Finder", "⚔️ Compare",
+    "🏟️ League Analysis", "🧠 Explainability"
+])
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TAB 1: OVERVIEW
+# ═══════════════════════════════════════════════════════════════════
+with tab1:
+    st.subheader("Predicted vs Actual Market Value")
+    color_seq = [LEAGUE_COLORS.get(l, "#666") for l in filtered["league_label"].unique()]
+
+    fig = px.scatter(
+        filtered, x="actual_m", y="predicted_m",
+        color="league_label", color_discrete_sequence=color_seq,
+        size="actual_m", size_max=16, hover_name="player",
+        hover_data={"squad": True, "position_group": True, "age": True,
+                    "actual_m": ":.1f", "predicted_m": ":.1f",
+                    "gap_m": ":.1f", "league_label": False},
+        labels={"actual_m": "Actual Value (€M)", "predicted_m": "Predicted Value (€M)",
+                "league_label": "League", "squad": "Club",
+                "position_group": "Position", "gap_m": "Gap (€M)"},
     )
+    mx = max(filtered["actual_m"].max(), filtered["predicted_m"].max()) * 1.05
+    fig.add_trace(go.Scatter(x=[0, mx], y=[0, mx], mode="lines",
+                             line=dict(color="#555", width=1.5, dash="dash"),
+                             name="Perfect prediction"))
+    fig.update_layout(height=520, margin=dict(l=20, r=20, t=20, b=20),
+                      paper_bgcolor=BG, plot_bgcolor=BG, font=dict(color="#fff"),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                  xanchor="center", x=0.5),
+                      xaxis=dict(gridcolor="#222"), yaxis=dict(gridcolor="#222"))
+    st.plotly_chart(fig, use_container_width=True)
 
-st.divider()
+    # Leaderboards
+    col_u, col_o = st.columns(2)
+    for col, title, emoji, ascending in [
+        (col_u, "Most Undervalued", "🟢", False),
+        (col_o, "Most Overvalued", "🔴", True),
+    ]:
+        with col:
+            st.markdown(f"### {emoji} {title}")
+            board = (filtered.nlargest(15, "gap_m") if not ascending
+                     else filtered.nsmallest(15, "gap_m"))
+            show = board[["player", "squad", "position_group", "age",
+                          "actual_m", "predicted_m", "gap_m"]].copy()
+            show.columns = ["Player", "Club", "Pos", "Age",
+                            "Actual (€M)", "Pred (€M)", "Gap (€M)"]
+            show.index = range(1, len(show) + 1)
+            st.dataframe(show, use_container_width=True, height=480)
 
-# ── Section 4: Feature importance ────────────────────────────────────────────
+    st.divider()
 
-st.subheader("What Drives Market Value?")
-st.caption("XGBoost feature importance (gain) from the trained model")
+    # ── Player Search with Photo ─────────────────────────────────
+    st.subheader("🔎 Player Search")
+    player_opts = sorted(filtered["player"].dropna().unique().tolist())
+    sel = st.selectbox("Search for a player",
+                       ["— select —"] + player_opts, index=0)
 
-fi_df = (
-    pd.DataFrame.from_dict(FEATURE_IMPORTANCES, orient="index", columns=["Importance"])
-    .sort_values("Importance")
-    .reset_index()
-    .rename(columns={"index": "Feature"})
-)
+    if sel != "— select —":
+        row = filtered[filtered["player"] == sel].iloc[0]
 
-fig_fi = px.bar(
-    fi_df,
-    x="Importance",
-    y="Feature",
-    orientation="h",
-    text=fi_df["Importance"].apply(lambda v: f"{v:.1%}"),
-    title="What Drives Market Value? (XGBoost Feature Importance)",
-    color="Importance",
-    color_continuous_scale=[[0, "#e8f4fd"], [1, "#1a56db"]],
-)
-fig_fi.update_traces(
-    textposition="outside",
-    marker_line_width=0,
-)
-fig_fi.update_layout(
-    height=400,
-    margin=dict(l=20, r=80, t=50, b=20),
-    paper_bgcolor="#0e1117",
-    plot_bgcolor="#0e1117",
-    font=dict(family="Inter, Arial, sans-serif", color="#ffffff"),
-    coloraxis_showscale=False,
-    xaxis=dict(
-        title="Feature Importance (Gain)",
-        title_font=dict(color="#ffffff"),
-        tickfont=dict(color="#ffffff"),
-        tickformat=".0%",
-        gridcolor="#333333",
-        zerolinecolor="#333333",
-    ),
-    yaxis=dict(
-        title="",
-        tickfont=dict(color="#ffffff"),
-        gridcolor="#333333",
-        zerolinecolor="#333333",
-    ),
-)
+        col_photo, col_info = st.columns([1, 3])
 
-st.plotly_chart(fig_fi, use_container_width=True)
+        with col_photo:
+            img = row.get("tm_image_url", "")
+            if pd.notna(img) and str(img).startswith("http"):
+                st.image(str(img), width=160)
 
-# ── Footer ────────────────────────────────────────────────────────────────────
+            # Transfermarkt link
+            tm_url = row.get("tm_url", "")
+            if pd.notna(tm_url) and str(tm_url).startswith("http"):
+                st.markdown(f"[View on Transfermarkt ↗]({tm_url})")
 
+        with col_info:
+            pos_label = POSITION_LABELS.get(row.get("position_group", ""), "")
+            squad = row.get("squad", "")
+            league = row.get("league_label", "")
+            nationality = row.get("nation", row.get("tm_country_of_citizenship", ""))
+            if pd.isna(nationality):
+                nationality = ""
+
+            st.markdown(f"### {sel}")
+            st.caption(f"**{pos_label}** · {squad} · {league} · {nationality}")
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Actual Value", f"€{row['actual_m']:.1f}M")
+            m2.metric("Predicted", f"€{row['predicted_m']:.1f}M")
+            gap = row.get("gap_m", 0)
+            pct = row.get("value_gap_pct", 0)
+            m3.metric("Gap", f"€{abs(gap):.1f}M",
+                      delta=f"{'Under' if gap >= 0 else 'Over'}valued ({pct:+.0f}%)"
+                      if pd.notna(pct) else None,
+                      delta_color="normal" if gap >= 0 else "inverse")
+            age_v = row.get("age", None)
+            m4.metric("Age", f"{int(age_v)}" if pd.notna(age_v) else "N/A")
+
+            # Extra info row
+            e1, e2, e3, e4 = st.columns(4)
+            contract = row.get("contract_years_remaining", None)
+            e1.metric("Contract", f"{contract:.1f} yrs" if pd.notna(contract) else "N/A")
+
+            peak = row.get("peak_m", None)
+            e2.metric("Peak Value", f"€{peak:.1f}M" if pd.notna(peak) else "N/A")
+
+            caps = row.get("tm_international_caps", None)
+            goals_int = row.get("tm_international_goals", None)
+            if pd.notna(caps):
+                e3.metric("Int'l Caps", f"{int(caps)}")
+            if pd.notna(goals_int):
+                e4.metric("Int'l Goals", f"{int(goals_int)}")
+
+        # Confidence interval
+        lo = row.get("predicted_value_lower_m", None)
+        hi = row.get("predicted_value_upper_m", None)
+        if pd.notna(lo) and pd.notna(hi):
+            st.info(f"📐 **80% Confidence Interval:** €{lo:.1f}M – €{hi:.1f}M")
+
+        # Historical value trend
+        pid = row.get("tm_player_id", None)
+        if pd.notna(pid) and not val_history.empty:
+            player_hist = val_history[
+                val_history["player_id"] == int(pid)
+            ].sort_values("date")
+            if len(player_hist) > 2:
+                st.markdown("#### 📈 Market Value History")
+                fig_hist = px.line(
+                    player_hist, x="date", y="value_m",
+                    labels={"date": "", "value_m": "Market Value (€M)"},
+                )
+                fig_hist.update_traces(line_color="#3b82f6", line_width=2)
+                fig_hist.update_layout(
+                    height=250, margin=dict(l=20, r=20, t=10, b=20),
+                    paper_bgcolor=BG, plot_bgcolor=BG,
+                    font=dict(color="#fff"),
+                    xaxis=dict(gridcolor="#1a1d24"),
+                    yaxis=dict(gridcolor="#1a1d24"),
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TAB 2: TRANSFER FINDER
+# ═══════════════════════════════════════════════════════════════════
+with tab2:
+    st.subheader("🔍 Transfer Recommendation Engine")
+    st.caption("Find undervalued players by position, budget, and age")
+
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        finder_pos = st.selectbox("Position", ["All"] + list(POSITION_LABELS.keys()),
+                                  format_func=lambda x: "All" if x == "All"
+                                  else POSITION_LABELS.get(x, x))
+    with f2:
+        max_budget = st.slider("Max Budget (€M)", 1, 200, 50)
+    with f3:
+        max_age_finder = st.slider("Max Age", 18, 38, 28)
+
+    fdf = filtered.copy()
+    if finder_pos != "All":
+        fdf = fdf[fdf["position_group"] == finder_pos]
+    fdf = fdf[(fdf["actual_m"] <= max_budget) &
+              (fdf["age"] <= max_age_finder) &
+              (fdf["gap_m"] > 0)].sort_values("gap_m", ascending=False)
+
+    if fdf.empty:
+        st.info("No undervalued players match. Try wider filters.")
+    else:
+        st.success(f"Found **{len(fdf)}** undervalued players under €{max_budget}M")
+
+        show = fdf[["player", "squad", "position_group", "age",
+                     "actual_m", "predicted_m", "gap_m"]].head(25).copy()
+        show.columns = ["Player", "Club", "Pos", "Age",
+                        "Price (€M)", "Model Value (€M)", "Bargain (€M)"]
+        show.index = range(1, len(show) + 1)
+        st.dataframe(show, use_container_width=True, height=600)
+
+        # Export button
+        csv = fdf[["player", "squad", "position_group", "age",
+                    "actual_m", "predicted_m", "gap_m"]].to_csv(index=False)
+        st.download_button("📥 Export results as CSV", csv,
+                           "transfer_recommendations.csv", "text/csv")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TAB 3: COMPARE PLAYERS
+# ═══════════════════════════════════════════════════════════════════
+with tab3:
+    st.subheader("⚔️ Player Comparison")
+    opts = sorted(filtered["player"].dropna().unique().tolist())
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        p1 = st.selectbox("Player 1", ["—"] + opts, key="c1")
+    with c2:
+        p2 = st.selectbox("Player 2", ["—"] + opts, key="c2")
+    with c3:
+        p3 = st.selectbox("Player 3 (optional)", ["—"] + opts, key="c3")
+
+    sels = [p for p in [p1, p2, p3] if p != "—"]
+
+    if len(sels) >= 2:
+        cdf = filtered[filtered["player"].isin(sels)]
+
+        # Photo + value cards
+        pcols = st.columns(len(sels))
+        for i, (_, row) in enumerate(cdf.iterrows()):
+            with pcols[i]:
+                img = row.get("tm_image_url", "")
+                if pd.notna(img) and str(img).startswith("http"):
+                    st.image(str(img), width=100)
+                st.markdown(f"**{row['player']}**")
+                st.caption(f"{row.get('squad', '')} · {int(row.get('age', 0))}")
+                st.metric("Actual", f"€{row['actual_m']:.1f}M")
+                st.metric("Predicted", f"€{row['predicted_m']:.1f}M")
+                g = row.get("gap_m", 0)
+                st.metric("Gap", f"{'+'if g>=0 else ''}€{g:.1f}M",
+                          delta_color="normal" if g >= 0 else "inverse")
+
+        # Radar chart
+        st.markdown("#### 📊 Stats Radar")
+        positions = cdf["position_group"].mode()
+        rpos = positions.iloc[0] if not positions.empty else "MF"
+        rcfg = RADAR_STATS.get(rpos, RADAR_STATS["MF"])
+        avail = {k: v for k, v in rcfg.items() if k in cdf.columns}
+
+        if len(avail) >= 3:
+            fig_r = go.Figure()
+            colors = ["#3b82f6", "#ef4444", "#22c55e"]
+            for i, (_, row) in enumerate(cdf.iterrows()):
+                vals = []
+                for sc in avail:
+                    v = pd.to_numeric(row.get(sc, 0), errors="coerce")
+                    vals.append(v if pd.notna(v) else 0)
+                # Normalize to percentile
+                for j, sc in enumerate(avail):
+                    cd = pd.to_numeric(filtered[sc], errors="coerce")
+                    mx = cd.quantile(0.95)
+                    vals[j] = min(vals[j] / mx * 100, 100) if mx > 0 else 0
+                fig_r.add_trace(go.Scatterpolar(
+                    r=vals + [vals[0]],
+                    theta=list(avail.values()) + [list(avail.values())[0]],
+                    fill="toself", name=row["player"],
+                    line=dict(color=colors[i % 3]), opacity=0.6))
+            fig_r.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100],
+                                           showticklabels=False),
+                           bgcolor=BG),
+                height=420, paper_bgcolor=BG, font=dict(color="#fff"),
+                margin=dict(l=60, r=60, t=30, b=30))
+            st.plotly_chart(fig_r, use_container_width=True)
+    elif len(sels) == 1:
+        st.info("Select at least 2 players to compare.")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TAB 4: LEAGUE ANALYSIS
+# ═══════════════════════════════════════════════════════════════════
+with tab4:
+    st.subheader("🏟️ League-Level Analysis")
+    st.caption("Which leagues have the most undervalued or overvalued players?")
+
+    if "value_gap_pct" in filtered.columns and "league_label" in filtered.columns:
+        league_stats = filtered.groupby("league_label").agg(
+            avg_gap_pct=("value_gap_pct", "mean"),
+            median_gap_pct=("value_gap_pct", "median"),
+            avg_actual=("actual_m", "mean"),
+            avg_predicted=("predicted_m", "mean"),
+            n_players=("player", "count"),
+            n_undervalued=("gap_m", lambda x: (x > 0).sum()),
+        ).reset_index()
+        league_stats["pct_undervalued"] = (
+            league_stats["n_undervalued"] / league_stats["n_players"] * 100
+        ).round(1)
+        league_stats = league_stats.sort_values("avg_gap_pct", ascending=False)
+
+        # Bar chart: avg gap by league
+        fig_league = px.bar(
+            league_stats, x="league_label", y="avg_gap_pct",
+            color="league_label",
+            color_discrete_map=LEAGUE_COLORS,
+            labels={"league_label": "", "avg_gap_pct": "Avg Gap (%)"},
+            text=league_stats["avg_gap_pct"].apply(lambda x: f"{x:+.1f}%"),
+        )
+        fig_league.update_layout(
+            height=400, showlegend=False,
+            paper_bgcolor=BG, plot_bgcolor=BG, font=dict(color="#fff"),
+            xaxis=dict(gridcolor="#222"), yaxis=dict(gridcolor="#222"),
+            margin=dict(l=20, r=20, t=20, b=20),
+        )
+        fig_league.update_traces(textposition="outside")
+        st.plotly_chart(fig_league, use_container_width=True)
+
+        # Stats table
+        st.markdown("#### Summary")
+        show_ls = league_stats[["league_label", "n_players", "avg_actual",
+                                "avg_predicted", "avg_gap_pct",
+                                "pct_undervalued"]].copy()
+        show_ls.columns = ["League", "Players", "Avg Actual (€M)",
+                           "Avg Predicted (€M)", "Avg Gap (%)",
+                           "% Undervalued"]
+        show_ls["Avg Actual (€M)"] = show_ls["Avg Actual (€M)"].round(1)
+        show_ls["Avg Predicted (€M)"] = show_ls["Avg Predicted (€M)"].round(1)
+        show_ls["Avg Gap (%)"] = show_ls["Avg Gap (%)"].apply(
+            lambda x: f"{x:+.1f}%")
+        show_ls.index = range(1, len(show_ls) + 1)
+        st.dataframe(show_ls, use_container_width=True)
+
+        st.caption(
+            "**Positive gap** = league's players are undervalued on average "
+            "(stats predict higher). **Negative** = overvalued."
+        )
+
+    # Position breakdown
+    st.divider()
+    st.markdown("#### By Position")
+    if "position_group" in filtered.columns and "value_gap_pct" in filtered.columns:
+        pos_stats = filtered.groupby("position_group").agg(
+            avg_gap=("value_gap_pct", "mean"),
+            avg_value=("actual_m", "mean"),
+            count=("player", "count"),
+        ).reset_index()
+        pos_stats["position_group"] = pos_stats["position_group"].map(POSITION_LABELS)
+
+        p1, p2, p3 = st.columns(3)
+        for i, (_, row) in enumerate(pos_stats.iterrows()):
+            with [p1, p2, p3][i]:
+                st.metric(row["position_group"],
+                          f"€{row['avg_value']:.1f}M avg",
+                          delta=f"{row['avg_gap']:+.1f}% avg gap")
+                st.caption(f"{int(row['count'])} players")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TAB 5: EXPLAINABILITY
+# ═══════════════════════════════════════════════════════════════════
+with tab5:
+    st.subheader("🧠 What Drives Market Value?")
+
+    # Position model performance
+    pos_models = metrics.get("position_models", {})
+    if pos_models:
+        st.markdown("#### Position-Specific Model Performance")
+        pcols = st.columns(len(pos_models))
+        for i, (pos, data) in enumerate(pos_models.items()):
+            with pcols[i]:
+                st.markdown(f"**{POSITION_LABELS.get(pos, pos)}**")
+                st.metric("R²", f"{data['r2']:.3f}")
+                st.metric("RMSE", f"€{data['rmse_eur']/1e6:.1f}M")
+                st.caption(f"{data['n_players']} players")
+
+    st.divider()
+
+    # Value gap distribution
+    st.markdown("#### Value Gap Distribution")
+    if "value_gap_pct" in filtered.columns:
+        fig_d = px.histogram(
+            filtered, x="value_gap_pct", nbins=40,
+            color_discrete_sequence=["#3b82f6"],
+            labels={"value_gap_pct": "Value Gap (%)"},
+        )
+        fig_d.add_vline(x=0, line_dash="dash", line_color="#555")
+        fig_d.update_layout(height=320, paper_bgcolor=BG, plot_bgcolor=BG,
+                            font=dict(color="#fff"), showlegend=False,
+                            xaxis=dict(gridcolor="#222"),
+                            yaxis=dict(title="Players", gridcolor="#222"),
+                            margin=dict(l=20, r=20, t=10, b=20))
+        st.plotly_chart(fig_d, use_container_width=True)
+
+    st.divider()
+
+    # Global model stats
+    g = metrics.get("global", {})
+    st.markdown("#### Model Details")
+    d1, d2, d3, d4 = st.columns(4)
+    if "r2" in g:
+        d1.metric("R²", f"{g['r2']:.3f}")
+    if "rmse_eur" in g:
+        d2.metric("RMSE", f"€{g['rmse_eur']/1e6:.1f}M")
+    if "cv_r2_mean" in g:
+        d3.metric("CV R² (5-fold)", f"{g['cv_r2_mean']:.3f} ± {g.get('cv_r2_std', 0):.3f}")
+    d4.metric("Players", f"{len(df)}")
+
+    st.divider()
+
+    # Methodology
+    st.markdown("#### Methodology")
+    st.markdown(f"""
+**Data:** FBref (per-90 performance stats) + Transfermarkt via Kaggle (market values).
+{len(df)} outfield players with ≥900 minutes across the Big 5 European Leagues.
+
+**Model:** XGBoost gradient-boosted trees. Features include goals, assists, xG, xAG,
+progressive passes & carries, tackles, interceptions, age, contract length, league prestige, and club tier.
+
+**Reality Grounding:** Predictions are blended {int(model_weight*100)}% model /
+{int((1-model_weight)*100)}% market value. The market captures factors pure stats miss —
+brand value, shirt sales, social media following, agent leverage, and scarcity premiums.
+
+**Gap Cap:** ±60% maximum. No player can be more than 60% under/overvalued.
+
+**Position Models:** Separate XGBoost models for forwards, midfielders, and defenders,
+since value drivers differ by position (goals for strikers vs tackles for center-backs).
+    """)
+
+    # Export full dataset
+    st.divider()
+    st.markdown("#### 📥 Export Data")
+    full_csv = filtered[["player", "squad", "position_group", "league_label",
+                          "age", "actual_m", "predicted_m", "gap_m",
+                          "value_gap_pct"]].to_csv(index=False)
+    st.download_button("Download full dataset (CSV)", full_csv,
+                       "transfer_valuation_data.csv", "text/csv")
+
+
+# ── Footer ───────────────────────────────────────────────────────────
 st.divider()
 st.caption(
-    "Data: FBref (2023–24 season) · Transfermarkt (via Kaggle)  |  "
-    "Model: XGBoost · R²=0.507 · RMSE=€19.8M on test set  |  "
-    "Portfolio project — not for commercial use"
+    f"Data: FBref ({SEASON}) · Transfermarkt (via Kaggle)  |  "
+    f"Model: XGBoost · Blended predictions  |  "
+    f"Portfolio project — not for commercial use"
 )

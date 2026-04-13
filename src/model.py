@@ -1,17 +1,18 @@
 """
-model.py — Train XGBoost valuation model with SHAP + position models.
+model.py — Train XGBoost valuation model with reality-grounded predictions.
 
-Trains:
-  1. Global XGBoost model across all positions
-  2. Position-specific models (FW, MF, DF)
-  3. SHAP explainability for each model
-  4. Confidence intervals via quantile regression
-
-Saves predictions + SHAP values to data/processed/.
+Key improvements over v1:
+  - Blended predictions: mix model output with actual market value
+    (the market knows things stats don't — brand, scarcity, contract leverage)
+  - Capped value gaps: no player can be >60% under/overvalued
+  - Club premium: elite clubs command higher fees
+  - Toned-down age/league multipliers
+  - SHAP explainability + position-specific models
+  - Confidence intervals via quantile regression
 
 Usage:
     python src/model.py
-    python src/model.py --season 2425
+    python src/model.py --season 2526
 """
 
 import argparse
@@ -23,7 +24,6 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -48,21 +48,28 @@ except ImportError:
     HAS_QUANTILE = False
 
 
+# ── Configuration ────────────────────────────────────────────────────
+# How much to trust the model vs the market (0 = pure market, 1 = pure model)
+MODEL_WEIGHT = 0.65
+
+# Maximum percentage a player can be under/overvalued
+MAX_GAP_PCT = 60  # ±60%
+
+
 # ── Feature sets ─────────────────────────────────────────────────────
-# Core features used by all models
 CORE_FEATURES = [
     "age",
     "contract_years_remaining",
     "league_prestige",
     "is_forward", "is_midfielder", "is_defender",
+    "is_elite_club", "club_premium",
 ]
 
-# Performance features (per 90)
 PERFORMANCE_FEATURES = [
     "goals_per90", "assists_per90",
-    "goals_pens_per90",       # non-penalty goals
-    "xg_per90", "xg_assist_per90",  # xG, xAG
-    "npxg_per90",             # non-penalty xG
+    "goals_pens_per90",
+    "xg_per90", "xg_assist_per90",
+    "npxg_per90",
     "shots_per90", "shots_on_target_per90",
     "goals_per_shot",
     "progressive_passes_per90",
@@ -76,7 +83,6 @@ PERFORMANCE_FEATURES = [
     "carries_into_final_third_per90",
 ]
 
-# Position-specific features
 POSITION_FEATURES = {
     "FW": [
         "goals_per90", "goals_pens_per90", "xg_per90", "npxg_per90",
@@ -84,6 +90,7 @@ POSITION_FEATURES = {
         "shots_per90", "shots_on_target_per90", "goals_per_shot",
         "progressive_carries_per90", "successful_dribbles_per90",
         "age", "contract_years_remaining", "league_prestige",
+        "is_elite_club", "club_premium",
     ],
     "MF": [
         "goals_per90", "assists_per90",
@@ -93,6 +100,7 @@ POSITION_FEATURES = {
         "tackles_won_per90", "interceptions_per90",
         "successful_dribbles_per90",
         "age", "contract_years_remaining", "league_prestige",
+        "is_elite_club", "club_premium",
     ],
     "DF": [
         "tackles_won_per90", "interceptions_per90",
@@ -101,6 +109,7 @@ POSITION_FEATURES = {
         "passes_into_final_third_per90",
         "goals_per90", "assists_per90",
         "age", "contract_years_remaining", "league_prestige",
+        "is_elite_club", "club_premium",
     ],
 }
 
@@ -108,7 +117,6 @@ ALL_FEATURES = list(set(CORE_FEATURES + PERFORMANCE_FEATURES))
 
 
 def get_available_features(df: pd.DataFrame, wanted: list[str]) -> list[str]:
-    """Return only the features that exist in the DataFrame."""
     available = [f for f in wanted if f in df.columns]
     missing = set(wanted) - set(available)
     if missing:
@@ -117,19 +125,15 @@ def get_available_features(df: pd.DataFrame, wanted: list[str]) -> list[str]:
 
 
 def prepare_data(df: pd.DataFrame, features: list[str], target: str):
-    """Prepare X, y arrays with NaN handling."""
     available = get_available_features(df, features)
     subset = df[available + [target]].dropna()
-
     X = subset[available].values
     y = subset[target].values
-
     return X, y, available, subset.index
 
 
 # ── Train global model ───────────────────────────────────────────────
 def train_global_model(df: pd.DataFrame) -> dict:
-    """Train XGBoost on all players."""
     print("\n" + "="*60)
     print("🌍 GLOBAL MODEL (all positions)")
     print("="*60)
@@ -141,7 +145,6 @@ def train_global_model(df: pd.DataFrame) -> dict:
     X_train, X_test, y_train, y_test, idx_train, idx_test = \
         train_test_split(X, y, idx, test_size=0.2, random_state=42)
 
-    # XGBoost
     model = xgb.XGBRegressor(
         n_estimators=500,
         max_depth=6,
@@ -159,13 +162,9 @@ def train_global_model(df: pd.DataFrame) -> dict:
         verbose=False,
     )
 
-    # Evaluate
     y_pred = model.predict(X_test)
     r2 = r2_score(y_test, y_pred)
     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-    mae = mean_absolute_error(y_test, y_pred)
-
-    # Convert back from log scale for interpretability
     rmse_eur = np.sqrt(mean_squared_error(
         np.expm1(y_test), np.expm1(y_pred)
     ))
@@ -173,9 +172,7 @@ def train_global_model(df: pd.DataFrame) -> dict:
     print(f"\n  📊 Results (test set):")
     print(f"     R²:   {r2:.4f}")
     print(f"     RMSE: {rmse:.4f} (log) | €{rmse_eur:,.0f}")
-    print(f"     MAE:  {mae:.4f} (log)")
 
-    # Cross-validation
     cv_scores = cross_val_score(model, X, y, cv=5, scoring="r2")
     print(f"     CV R²: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
 
@@ -186,7 +183,6 @@ def train_global_model(df: pd.DataFrame) -> dict:
         explainer = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(X_test)
 
-        # Feature importance ranking
         shap_importance = np.abs(shap_values).mean(axis=0)
         importance_df = pd.DataFrame({
             "feature": features,
@@ -213,7 +209,6 @@ def train_global_model(df: pd.DataFrame) -> dict:
 
 # ── Train position-specific models ───────────────────────────────────
 def train_position_models(df: pd.DataFrame) -> dict:
-    """Train separate models for FW, MF, DF."""
     print("\n" + "="*60)
     print("🎯 POSITION-SPECIFIC MODELS")
     print("="*60)
@@ -273,29 +268,22 @@ def train_position_models(df: pd.DataFrame) -> dict:
 def compute_confidence_intervals(
     df: pd.DataFrame, features: list[str], target: str
 ) -> pd.DataFrame:
-    """
-    Compute prediction intervals using quantile regression.
-    Returns DataFrame with lower/upper bound columns.
-    """
     print("\n  📐 Computing confidence intervals...")
 
     X, y, avail_features, idx = prepare_data(df, features, target)
 
-    # Lower bound (10th percentile)
     model_lo = GradientBoostingRegressor(
         loss="quantile", alpha=0.10,
         n_estimators=300, max_depth=5, random_state=42
     )
     model_lo.fit(X, y)
 
-    # Upper bound (90th percentile)
     model_hi = GradientBoostingRegressor(
         loss="quantile", alpha=0.90,
         n_estimators=300, max_depth=5, random_state=42
     )
     model_hi.fit(X, y)
 
-    # Predict on full dataset
     pred_lo = np.expm1(model_lo.predict(X))
     pred_hi = np.expm1(model_hi.predict(X))
 
@@ -307,52 +295,80 @@ def compute_confidence_intervals(
     return result
 
 
-# ── Generate predictions for all players ─────────────────────────────
+# ── Reality-grounded predictions ─────────────────────────────────────
 def generate_predictions(df: pd.DataFrame, global_result: dict) -> pd.DataFrame:
-    """Apply model to all players and compute value gaps."""
+    """
+    Generate predictions with reality checks:
+    1. Blend model prediction with actual market value
+    2. Apply modest age/league/club adjustments
+    3. Cap maximum value gap at ±MAX_GAP_PCT%
+    """
     print("\n" + "="*60)
-    print("📈 GENERATING PREDICTIONS")
+    print("📈 GENERATING PREDICTIONS (reality-grounded)")
     print("="*60)
+    print(f"  Model weight: {MODEL_WEIGHT:.0%} model / "
+          f"{1-MODEL_WEIGHT:.0%} market")
+    print(f"  Max gap: ±{MAX_GAP_PCT}%")
 
     model = global_result["model"]
     features = global_result["features"]
 
-    # Prepare full dataset
     X_full, _, _, idx_full = prepare_data(
         df, features, "log_market_value"
     )
 
-    # Predict (log scale)
+    # Step 1: Raw model prediction (log scale → EUR)
     log_predictions = model.predict(X_full)
-
-    # Back to EUR
     raw_predictions = np.expm1(log_predictions)
 
-    # Apply adjustment multipliers
     subset = df.loc[idx_full].copy()
     subset["predicted_raw_eur"] = raw_predictions
 
-    # Age-potential adjustment
+    # Step 2: Apply MODEST adjustments
+    adjusted = raw_predictions.copy()
+
     if "age_potential_mult" in subset.columns:
+        adjusted = adjusted * subset["age_potential_mult"].values
+
+    if "club_premium" in subset.columns:
+        adjusted = adjusted * subset["club_premium"].values
+
+    subset["predicted_adjusted_eur"] = adjusted
+
+    # Step 3: BLEND with actual market value
+    # This is the key insight — the market isn't stupid.
+    # A pure model misses brand value, scarcity, hype, agent power.
+    # Blending says: "I trust the model 65%, the market 35%"
+    if "market_value_eur" in subset.columns:
+        actual = subset["market_value_eur"].values
         subset["predicted_value_eur"] = (
-            subset["predicted_raw_eur"] * subset["age_potential_mult"]
+            MODEL_WEIGHT * adjusted + (1 - MODEL_WEIGHT) * actual
         )
     else:
-        subset["predicted_value_eur"] = subset["predicted_raw_eur"]
+        subset["predicted_value_eur"] = adjusted
 
-    # League prestige adjustment
-    if "league_prestige" in subset.columns:
-        subset["predicted_value_eur"] = (
-            subset["predicted_value_eur"] * subset["league_prestige"]
+    # Step 4: Cap the value gap
+    if "market_value_eur" in subset.columns:
+        actual = subset["market_value_eur"]
+
+        # Raw gap
+        subset["value_gap_eur_raw"] = (
+            subset["predicted_value_eur"] - actual
         )
 
-    # Value gap
-    if "market_value_eur" in subset.columns:
+        # Cap: predicted can't be more than MAX_GAP_PCT% above/below actual
+        max_pred = actual * (1 + MAX_GAP_PCT / 100)
+        min_pred = actual * (1 - MAX_GAP_PCT / 100)
+        subset["predicted_value_eur"] = subset["predicted_value_eur"].clip(
+            lower=min_pred, upper=max_pred
+        )
+
+        # Final gap after capping
         subset["value_gap_eur"] = (
-            subset["predicted_value_eur"] - subset["market_value_eur"]
+            subset["predicted_value_eur"] - actual
         )
         subset["value_gap_pct"] = (
-            subset["value_gap_eur"] / subset["market_value_eur"] * 100
+            subset["value_gap_eur"] / actual * 100
         )
 
     # Confidence intervals
@@ -360,7 +376,7 @@ def generate_predictions(df: pd.DataFrame, global_result: dict) -> pd.DataFrame:
         ci = compute_confidence_intervals(df, features, "log_market_value")
         subset = subset.join(ci, how="left")
 
-    # Sort by value gap
+    # Sort and display
     if "value_gap_eur" in subset.columns:
         subset = subset.sort_values("value_gap_eur", ascending=False)
 
@@ -370,8 +386,9 @@ def generate_predictions(df: pd.DataFrame, global_result: dict) -> pd.DataFrame:
             gap = row["value_gap_eur"]
             actual = row.get("market_value_eur", 0)
             pred = row["predicted_value_eur"]
+            pct = row.get("value_gap_pct", 0)
             print(f"     {name:25s}  Pred: €{pred:>10,.0f}  "
-                  f"Actual: €{actual:>10,.0f}  Gap: +€{gap:>10,.0f}")
+                  f"Actual: €{actual:>10,.0f}  Gap: +€{gap:>8,.0f} ({pct:+.0f}%)")
 
         print(f"\n  🔴 Top 10 OVERVALUED:")
         for _, row in subset.tail(10).iterrows():
@@ -379,15 +396,15 @@ def generate_predictions(df: pd.DataFrame, global_result: dict) -> pd.DataFrame:
             gap = row["value_gap_eur"]
             actual = row.get("market_value_eur", 0)
             pred = row["predicted_value_eur"]
+            pct = row.get("value_gap_pct", 0)
             print(f"     {name:25s}  Pred: €{pred:>10,.0f}  "
-                  f"Actual: €{actual:>10,.0f}  Gap: €{gap:>10,.0f}")
+                  f"Actual: €{actual:>10,.0f}  Gap: €{gap:>8,.0f} ({pct:+.0f}%)")
 
     return subset
 
 
 # ── Save model metrics ───────────────────────────────────────────────
 def save_metrics(global_result: dict, pos_results: dict, out_dir: str):
-    """Save model performance metrics as JSON."""
     metrics = {
         "global": {
             "r2": global_result["r2"],
@@ -395,6 +412,8 @@ def save_metrics(global_result: dict, pos_results: dict, out_dir: str):
             "cv_r2_mean": global_result["cv_r2_mean"],
             "cv_r2_std": global_result["cv_r2_std"],
             "features": global_result["features"],
+            "model_weight": MODEL_WEIGHT,
+            "max_gap_pct": MAX_GAP_PCT,
         },
         "position_models": {
             pos: {
@@ -415,13 +434,12 @@ def save_metrics(global_result: dict, pos_results: dict, out_dir: str):
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Train valuation model")
-    parser.add_argument("--season", default="2425")
+    parser.add_argument("--season", default="2526")
     args = parser.parse_args()
 
     base = os.path.join(os.path.dirname(__file__), "..")
     proc_dir = os.path.join(base, "data", "processed")
 
-    # Load dataset
     data_path = os.path.join(proc_dir, f"model_dataset_{args.season}.csv")
     if not os.path.exists(data_path):
         print(f"❌ Dataset not found: {data_path}")
@@ -435,20 +453,16 @@ def main():
         print("❌ xgboost is required. Run: pip install xgboost")
         return
 
-    # Train models
     global_result = train_global_model(df)
     pos_results = train_position_models(df)
 
-    # Generate predictions
     output = generate_predictions(df, global_result)
 
-    # Save
     out_path = os.path.join(proc_dir, f"model_output_{args.season}.csv")
     output.to_csv(out_path, index=False)
     print(f"\n💾 Predictions saved to {out_path}")
     print(f"   {len(output)} players with predictions")
 
-    # Save metrics
     save_metrics(global_result, pos_results, proc_dir)
 
 

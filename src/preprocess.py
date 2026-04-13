@@ -7,7 +7,7 @@ a model-ready dataset.
 
 Usage:
     python src/preprocess.py
-    python src/preprocess.py --season 2425
+    python src/preprocess.py --season 2526
 """
 
 import argparse
@@ -25,18 +25,32 @@ except ImportError:
           "Run: pip install rapidfuzz")
 
 
+# ── Elite clubs that command premium transfer fees ───────────────────
+ELITE_CLUBS = {
+    # Tier 1: global super-clubs
+    "Real Madrid", "Barcelona", "Manchester City", "Paris Saint-Germain",
+    "Bayern Munich", "Bayern München",
+    # Tier 2: consistent CL contenders
+    "Liverpool", "Arsenal", "Chelsea", "Manchester United",
+    "Juventus", "Inter Milan", "AC Milan", "Atlético Madrid",
+    "Borussia Dortmund",
+}
+
+TIER1_CLUBS = {
+    "Real Madrid", "Barcelona", "Manchester City",
+    "Paris Saint-Germain", "Bayern Munich", "Bayern München",
+}
+
+
 # ── Name cleaning ────────────────────────────────────────────────────
 def clean_name(name: str) -> str:
     """Normalize player name for matching."""
     if pd.isna(name):
         return ""
     import unicodedata
-    # Decompose accents
     name = unicodedata.normalize("NFKD", str(name))
     name = "".join(c for c in name if not unicodedata.combining(c))
-    # Lowercase, strip extra whitespace
     name = name.lower().strip()
-    # Remove common suffixes/prefixes
     for remove in ["jr.", "jr", "sr.", "sr", "ii", "iii"]:
         name = name.replace(remove, "")
     return " ".join(name.split())
@@ -52,21 +66,15 @@ def fuzzy_match_players(
 ) -> pd.DataFrame:
     """
     Match FBref players to Transfermarkt players by name + squad.
-
-    Returns merged DataFrame with match_score column.
     """
     print("🔗 Fuzzy-matching players...")
 
-    # Clean names
     fbref_df = fbref_df.copy()
     tm_df = tm_df.copy()
     fbref_df["_clean_name"] = fbref_df[fbref_name_col].apply(clean_name)
     tm_df["_clean_name"] = tm_df[tm_name_col].apply(clean_name)
 
-    # Build lookup from TM names
     tm_names = tm_df["_clean_name"].dropna().unique().tolist()
-    tm_lookup = {clean_name: idx for idx, clean_name in
-                 enumerate(tm_df["_clean_name"])}
 
     matches = []
     unmatched = 0
@@ -85,7 +93,6 @@ def fuzzy_match_players(
             )
             if result:
                 best_name, score, _ = result
-                # Find matching TM row
                 tm_match = tm_df[tm_df["_clean_name"] == best_name].iloc[0]
                 merged_row = {**row.to_dict(), **{
                     f"tm_{k}": v for k, v in tm_match.to_dict().items()
@@ -116,9 +123,7 @@ def fuzzy_match_players(
     print(f"  ✓ Matched: {matched}/{total} ({matched/total*100:.1f}%)")
     print(f"  ✗ Unmatched: {unmatched}")
 
-    # Drop helper columns
     result_df = result_df.drop(columns=["_clean_name"], errors="ignore")
-
     return result_df
 
 
@@ -127,12 +132,10 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add derived features for the model."""
     df = df.copy()
 
-    # ── Age from TM data if available ────────────────────────────────
-    age_col = None
+    # ── Age ───────────────────────────────────────────────────────────
     for candidate in ["age", "tm_age"]:
         if candidate in df.columns:
             df["age"] = pd.to_numeric(df[candidate], errors="coerce")
-            age_col = candidate
             break
 
     # ── Market value (target) ────────────────────────────────────────
@@ -147,9 +150,9 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         df["market_value_eur"] = pd.to_numeric(df[mv_col], errors="coerce")
         df["log_market_value"] = np.log1p(df["market_value_eur"])
 
-    # ── Per-90 stats that might need computing ───────────────────────
+    # ── Per-90 stats ─────────────────────────────────────────────────
     minutes_col = None
-    for candidate in ["minutes", "minutes_90s"]:
+    for candidate in ["minutes", "minutes_90s", "min", "90s"]:
         if candidate in df.columns:
             minutes_col = candidate
             break
@@ -158,7 +161,6 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         minutes = pd.to_numeric(df[minutes_col], errors="coerce")
         nineties = minutes / 90 if "90" not in str(minutes_col) else minutes
 
-        # Compute per-90 for counting stats if not already present
         counting_to_per90 = {
             "progressive_passes": "progressive_passes_per90",
             "progressive_carries": "progressive_carries_per90",
@@ -185,8 +187,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         df["is_midfielder"] = pos.str.contains("MF").astype(int)
         df["is_defender"] = pos.str.contains("DF").astype(int)
 
-        # Position group for position-specific models
-        df["position_group"] = "MF"  # default
+        df["position_group"] = "MF"
         df.loc[df["is_forward"] == 1, "position_group"] = "FW"
         df.loc[df["is_defender"] == 1, "position_group"] = "DF"
 
@@ -218,17 +219,18 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
             )
         )
 
-        # League prestige multiplier
+        # League prestige — toned down from v1
         prestige = {
-            "Premier League": 1.30,
-            "La Liga": 1.20,
-            "Bundesliga": 1.10,
-            "Serie A": 1.05,
+            "Premier League": 1.15,
+            "La Liga": 1.10,
+            "Bundesliga": 1.05,
+            "Serie A": 1.03,
             "Ligue 1": 1.00,
         }
         df["league_prestige"] = df["league_name"].map(prestige).fillna(1.0)
 
-    # ── Age potential multiplier ─────────────────────────────────────
+    # ── Age potential multiplier — REALISTIC ─────────────────────────
+    # Real transfer premiums are much smaller than v1
     if "age" in df.columns:
         conditions = [
             df["age"] <= 20,
@@ -237,8 +239,31 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
             (df["age"] > 27) & (df["age"] <= 30),
             df["age"] > 30,
         ]
-        multipliers = [1.50, 1.25, 1.00, 0.85, 0.70]
+        multipliers = [1.15, 1.08, 1.00, 0.93, 0.85]
         df["age_potential_mult"] = np.select(conditions, multipliers, default=1.0)
+
+    # ── Elite club premium ───────────────────────────────────────────
+    # Players at super-clubs are worth more due to brand, revenue,
+    # Champions League revenue, shirt sales, and negotiation power.
+    squad_col = None
+    for candidate in ["squad", "tm_current_club_name"]:
+        if candidate in df.columns:
+            squad_col = candidate
+            break
+
+    if squad_col:
+        df["is_elite_club"] = df[squad_col].astype(str).apply(
+            lambda x: any(club.lower() in x.lower() for club in ELITE_CLUBS)
+        ).astype(int)
+
+        df["is_tier1_club"] = df[squad_col].astype(str).apply(
+            lambda x: any(club.lower() in x.lower() for club in TIER1_CLUBS)
+        ).astype(int)
+
+        # Club premium multiplier
+        df["club_premium"] = 1.0
+        df.loc[df["is_elite_club"] == 1, "club_premium"] = 1.10
+        df.loc[df["is_tier1_club"] == 1, "club_premium"] = 1.15
 
     # ── Contract years ───────────────────────────────────────────────
     contract_col = None
@@ -258,7 +283,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Preprocess & merge datasets")
-    parser.add_argument("--season", default="2425")
+    parser.add_argument("--season", default="2526")
     args = parser.parse_args()
 
     base = os.path.join(os.path.dirname(__file__), "..")
@@ -296,7 +321,6 @@ def main():
     print(f"\n💾 Saved model dataset: {out_path}")
     print(f"   {len(dataset)} players × {len(dataset.columns)} features")
 
-    # Quick summary
     if "market_value_eur" in dataset.columns:
         mv = dataset["market_value_eur"]
         print(f"\n📈 Market value range: €{mv.min():,.0f} – €{mv.max():,.0f}")
