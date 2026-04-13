@@ -569,7 +569,8 @@ with tab3:
         cdf = filtered[filtered["player"].isin(sels)]
 
         # Photo + value cards
-        pcols = st.columns(len(sels))
+        cdf = cdf.drop_duplicates(subset=["player"], keep="first")
+        pcols = st.columns(len(cdf))
         for i, (_, row) in enumerate(cdf.iterrows()):
             with pcols[i]:
                 img = row.get("tm_image_url", "")
