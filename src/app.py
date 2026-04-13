@@ -1,5 +1,5 @@
 """
-app.py — Soccer Transfer Market Valuation Dashboard (V3 — Final)
+app.py — Soccer Transfer Market Valuation Dashboard (V4 — Final)
 
 Features:
   - Interactive scatter plot with hover details
@@ -11,6 +11,8 @@ Features:
   - SHAP explainability + value gap distribution
   - CSV export for filtered results
   - Historical value trends per player
+  - AI Scouting Assistant (powered by Claude API)
+  - Player Similarity Engine (cosine similarity)
   - Last-updated timestamp
 
 Run with:
@@ -25,6 +27,10 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import StandardScaler
+import requests as http_requests
+import re
 
 # ── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
@@ -155,22 +161,111 @@ model_weight = metrics.get("global", {}).get("model_weight", 0.65)
 # ── CSS ──────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .main .block-container { padding-top: 1rem; max-width: 1400px; }
+    /* ── Page layout ── */
+    .main .block-container { padding-top: 0.5rem; max-width: 1500px; }
+
+    /* ── Tab styling — bigger, bolder ── */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0px;
+        background: #111318;
+        border-radius: 12px;
+        padding: 6px;
+        border: 1px solid #2a2d34;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 14px 24px;
+        font-size: 1.05rem;
+        font-weight: 500;
+        border-radius: 8px;
+        color: #9ca3af;
+    }
+    .stTabs [aria-selected="true"] {
+        background: #1e40af !important;
+        color: #ffffff !important;
+        font-weight: 600;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        color: #ffffff;
+        background: #1a1d24;
+    }
+    .stTabs [data-baseweb="tab-panel"] {
+        padding-top: 1.5rem;
+    }
+
+    /* ── Metric cards ── */
     div[data-testid="stMetric"] {
-        background: #1a1d24; padding: 10px 14px;
-        border-radius: 8px; border: 1px solid #2a2d34;
+        background: linear-gradient(135deg, #1a1d24 0%, #1e2028 100%);
+        padding: 14px 18px;
+        border-radius: 10px;
+        border: 1px solid #2a2d34;
+        transition: border-color 0.2s;
     }
-    div[data-testid="stMetric"] label { color: #9ca3af; font-size: 0.8rem; }
-    .player-card {
-        background: #1a1d24; border-radius: 12px;
-        padding: 20px; border: 1px solid #2a2d34;
+    div[data-testid="stMetric"]:hover {
+        border-color: #3b82f6;
     }
+    div[data-testid="stMetric"] label {
+        color: #9ca3af;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        font-size: 1.6rem;
+        font-weight: 700;
+    }
+
+    /* ── Sidebar ── */
+    section[data-testid="stSidebar"] {
+        background: #0c0e12;
+        border-right: 1px solid #1a1d24;
+    }
+    section[data-testid="stSidebar"] .stMultiSelect label,
+    section[data-testid="stSidebar"] .stSlider label {
+        font-weight: 500;
+        color: #d1d5db;
+    }
+
+    /* ── Dataframes ── */
+    .stDataFrame { border-radius: 8px; overflow: hidden; }
+
+    /* ── Headers ── */
+    h1 { font-size: 2.2rem !important; font-weight: 800 !important; }
+    h2 { font-size: 1.5rem !important; }
+    h3 { font-size: 1.25rem !important; }
+
+    /* ── Buttons ── */
+    .stDownloadButton button {
+        background: #1e40af;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 24px;
+        font-weight: 600;
+    }
+    .stDownloadButton button:hover {
+        background: #2563eb;
+    }
+
+    /* ── Expander ── */
+    .streamlit-expanderHeader {
+        font-weight: 500;
+        color: #d1d5db;
+    }
+
+    /* ── Dividers ── */
+    hr { border-color: #1a1d24 !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ── Header ───────────────────────────────────────────────────────────
-st.title("⚽ Soccer Transfer Valuation Model")
+st.markdown("""
+<div style="padding: 1.5rem 0 0.5rem 0;">
+    <h1 style="margin:0; font-size:2.4rem; font-weight:800;">
+        ⚽ Soccer Transfer Valuation Model
+    </h1>
+</div>
+""", unsafe_allow_html=True)
 st.caption(
     f"Comparing predicted market values (from on-pitch stats) vs actual "
     f"Transfermarkt valuations · **{SEASON}** · Big 5 European Leagues · "
@@ -225,9 +320,10 @@ if filtered.empty:
 
 
 # ── Tabs ─────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 Overview", "🔍 Transfer Finder", "⚔️ Compare",
-    "🏟️ League Analysis", "🧠 Explainability"
+    "🏟️ League Analysis", "🧠 Explainability",
+    "🤖 AI Scout", "🔗 Similar Players"
 ])
 
 
@@ -637,6 +733,253 @@ since value drivers differ by position (goals for strikers vs tackles for center
                           "value_gap_pct"]].to_csv(index=False)
     st.download_button("Download full dataset (CSV)", full_csv,
                        "transfer_valuation_data.csv", "text/csv")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TAB 6: AI SCOUT
+# ═══════════════════════════════════════════════════════════════════
+with tab6:
+    st.subheader("🤖 AI Scouting Assistant")
+    st.caption(
+        "Ask a natural-language question about your transfer targets. "
+        "Powered by Claude — searches your player database in real time."
+    )
+
+    with st.expander("💡 Example queries"):
+        st.markdown("""
+- *Find me a young left winger under €20M who plays like a young Neymar*
+- *Who are the most undervalued defensive midfielders in the Bundesliga?*
+- *I need a striker under 23 with high xG and good pressing stats, budget €30M*
+- *Compare the top 3 undervalued center-backs in Serie A*
+- *Which Premier League players have the highest goals per 90 but are still undervalued?*
+        """)
+
+    scout_query = st.text_input(
+        "What are you looking for?",
+        placeholder="e.g. Find undervalued U23 forwards in La Liga under €25M...",
+    )
+
+    if scout_query:
+        with st.spinner("🔍 Scouting..."):
+            scout_cols = ["player", "squad", "pos", "position_group",
+                          "league_label", "age", "actual_m", "predicted_m",
+                          "gap_m", "value_gap_pct"]
+            for c in ["gls", "ast", "xg", "xag", "sh/90", "sot/90",
+                       "npxg", "ppa", "prgdist", "prgc", "prgp",
+                       "tkl", "tkld", "succ", "touches",
+                       "contract_years_remaining", "tm_international_caps"]:
+                if c in filtered.columns:
+                    scout_cols.append(c)
+            scout_cols = [c for c in scout_cols if c in filtered.columns]
+            data_summary = filtered[scout_cols].head(200).to_csv(index=False)
+
+            system_prompt = f"""You are an elite football scout assistant analyzing player data
+from the Big 5 European Leagues ({SEASON} season).
+
+You have a dataset of {len(filtered)} players with actual market values,
+model-predicted values, and the gap (positive = undervalued).
+
+Key columns: actual_m (market value €M), predicted_m (model value €M),
+gap_m (value gap €M), gls/ast (goals/assists), xg/xag (expected goals/assists),
+sh/90 sot/90 (shots per 90), prgp/prgc (progressive passes/carries), tkl (tackles).
+
+Give specific player recommendations with numbers. Be concise and actionable.
+Format player names in bold. Include values and predicted values."""
+
+            user_msg = f"""Query: {scout_query}
+
+Player data (top 200 by value gap):
+{data_summary}
+
+Answer with specific player recommendations."""
+
+            try:
+                response = http_requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "model": "claude-sonnet-4-20250514",
+                        "max_tokens": 1500,
+                        "messages": [{"role": "user", "content": user_msg}],
+                        "system": system_prompt,
+                    },
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    answer = "".join(
+                        b["text"] for b in result.get("content", [])
+                        if b.get("type") == "text"
+                    )
+                    st.markdown(answer)
+                else:
+                    st.warning("AI Scout unavailable. Using keyword search instead.")
+                    _fallback_search(scout_query, filtered)
+            except Exception:
+                st.warning("AI Scout unavailable. Using keyword search instead.")
+                _fallback_search(scout_query, filtered)
+
+
+def _fallback_search(query: str, data: pd.DataFrame):
+    """Keyword-based fallback when AI is unavailable."""
+    q = query.lower()
+    result = data.copy()
+    if any(w in q for w in ["forward", "striker", "winger", "fw"]):
+        result = result[result["position_group"] == "FW"]
+    elif any(w in q for w in ["midfielder", "mid", "mf"]):
+        result = result[result["position_group"] == "MF"]
+    elif any(w in q for w in ["defender", "back", "cb", "df"]):
+        result = result[result["position_group"] == "DF"]
+    for league in ["premier league", "la liga", "bundesliga", "serie a", "ligue 1"]:
+        if league in q:
+            result = result[result["league_label"].str.lower() == league]
+    age_match = re.search(r'under (\d+)', q)
+    if age_match:
+        result = result[result["age"] <= int(age_match.group(1))]
+    budget_match = re.search(r'€(\d+)m|(\d+)m budget|under (\d+)\s*m', q)
+    if budget_match:
+        budget = int(next(g for g in budget_match.groups() if g))
+        result = result[result["actual_m"] <= budget]
+    if "overvalued" not in q:
+        result = result[result["gap_m"] > 0]
+    result = result.sort_values("gap_m", ascending=False).head(10)
+    if result.empty:
+        st.warning("No players match your criteria.")
+    else:
+        show = result[["player", "squad", "position_group", "age",
+                        "actual_m", "predicted_m", "gap_m"]].copy()
+        show.columns = ["Player", "Club", "Pos", "Age",
+                        "Price (€M)", "Model Value (€M)", "Gap (€M)"]
+        show.index = range(1, len(show) + 1)
+        st.dataframe(show, use_container_width=True)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TAB 7: SIMILAR PLAYERS
+# ═══════════════════════════════════════════════════════════════════
+with tab7:
+    st.subheader("🔗 Find Similar Players")
+    st.caption(
+        "Select a player to find statistically similar players across the Big 5 leagues. "
+        "Uses cosine similarity across performance metrics."
+    )
+
+    SIM_FEATURES = [c for c in ["gls", "ast", "xg", "xag", "npxg", "sh/90",
+                                 "sot/90", "g/sh", "ppa", "prgp", "prgc",
+                                 "prgdist", "tkl", "tkld", "tkld%", "succ",
+                                 "succ%", "touches", "rec", "totdist",
+                                 "age", "minutes"]
+                    if c in filtered.columns]
+
+    sim_options = sorted(filtered["player"].dropna().unique().tolist())
+    sim_player = st.selectbox("Select a player", ["— select —"] + sim_options,
+                              key="sim_sel")
+
+    cs1, cs2 = st.columns(2)
+    with cs1:
+        n_similar = st.slider("Number of similar players", 5, 20, 10)
+    with cs2:
+        sim_pos_filter = st.checkbox("Same position only", value=True)
+        sim_cheaper = st.checkbox("Cheaper alternatives only", value=False)
+
+    if sim_player != "— select —" and len(SIM_FEATURES) >= 3:
+        target_row = filtered[filtered["player"] == sim_player]
+        if target_row.empty:
+            st.warning("Player not found.")
+        else:
+            target = target_row.iloc[0]
+
+            col_tp, col_ti = st.columns([1, 3])
+            with col_tp:
+                img = target.get("tm_image_url", "")
+                if pd.notna(img) and str(img).startswith("http"):
+                    st.image(str(img), width=130)
+            with col_ti:
+                st.markdown(f"### {sim_player}")
+                st.caption(
+                    f"**{POSITION_LABELS.get(target.get('position_group',''),'')}** · "
+                    f"{target.get('squad','')} · {target.get('league_label','')} · "
+                    f"Age {int(target.get('age',0))}"
+                )
+                sm1, sm2, sm3 = st.columns(3)
+                sm1.metric("Value", f"€{target['actual_m']:.1f}M")
+                sm2.metric("Predicted", f"€{target['predicted_m']:.1f}M")
+                g = target.get("gap_m", 0)
+                sm3.metric("Gap", f"{'+'if g>=0 else ''}€{g:.1f}M")
+
+            st.divider()
+
+            sim_data = filtered.copy()
+            if sim_pos_filter:
+                sim_data = sim_data[sim_data["position_group"] == target["position_group"]]
+            if sim_cheaper:
+                sim_data = sim_data[sim_data["actual_m"] < target["actual_m"]]
+            sim_data = sim_data[sim_data["player"] != sim_player]
+
+            if len(sim_data) < 3:
+                st.warning("Not enough players. Try unchecking filters.")
+            else:
+                all_p = pd.concat([target_row, sim_data])
+                X = all_p[SIM_FEATURES].apply(pd.to_numeric, errors="coerce").fillna(0)
+                scaler = StandardScaler()
+                X_s = scaler.fit_transform(X)
+                sims = cosine_similarity(X_s[0:1], X_s[1:])[0]
+                sim_data = sim_data.copy()
+                sim_data["similarity"] = sims
+                top_sim = sim_data.sort_values("similarity", ascending=False).head(n_similar)
+
+                st.markdown(f"#### Top {n_similar} Most Similar Players")
+                for rank, (_, row) in enumerate(top_sim.iterrows(), 1):
+                    c1, c2, c3, c4, c5, c6 = st.columns([0.5, 2.5, 1, 0.8, 0.8, 0.8])
+                    with c1:
+                        img = row.get("tm_image_url", "")
+                        if pd.notna(img) and str(img).startswith("http"):
+                            st.image(str(img), width=40)
+                    with c2:
+                        st.markdown(f"**{rank}. {row['player']}**")
+                        st.caption(f"{row.get('squad','')} · {row.get('league_label','')}")
+                    with c3:
+                        st.metric("Match", f"{row['similarity']*100:.0f}%")
+                    with c4:
+                        st.metric("Value", f"€{row['actual_m']:.0f}M")
+                    with c5:
+                        st.metric("Age", f"{int(row.get('age',0))}")
+                    with c6:
+                        g = row.get("gap_m", 0)
+                        st.metric("Gap", f"{'+'if g>=0 else ''}€{g:.1f}M")
+
+                # Radar: target vs top 3
+                st.divider()
+                st.markdown("#### Radar: Target vs Top 3 Matches")
+                radar_p = pd.concat([target_row, top_sim.head(3)])
+                rpos = target.get("position_group", "MF")
+                rcfg = RADAR_STATS.get(rpos, RADAR_STATS["MF"])
+                avail_r = {k: v for k, v in rcfg.items() if k in radar_p.columns}
+
+                if len(avail_r) >= 3:
+                    fig_sim = go.Figure()
+                    clrs = ["#f59e0b", "#3b82f6", "#ef4444", "#22c55e"]
+                    for i, (_, row) in enumerate(radar_p.iterrows()):
+                        vals = []
+                        for sc in avail_r:
+                            v = pd.to_numeric(row.get(sc, 0), errors="coerce")
+                            vals.append(v if pd.notna(v) else 0)
+                        for j, sc in enumerate(avail_r):
+                            mx = pd.to_numeric(filtered[sc], errors="coerce").quantile(0.95)
+                            vals[j] = min(vals[j]/mx*100, 100) if mx > 0 else 0
+                        name = f"⭐ {row['player']}" if i == 0 else row["player"]
+                        fig_sim.add_trace(go.Scatterpolar(
+                            r=vals+[vals[0]],
+                            theta=list(avail_r.values())+[list(avail_r.values())[0]],
+                            fill="toself", name=name,
+                            line=dict(color=clrs[i%4], width=3 if i==0 else 1.5),
+                            opacity=0.7 if i==0 else 0.4))
+                    fig_sim.update_layout(
+                        polar=dict(radialaxis=dict(visible=True, range=[0,100],
+                                                    showticklabels=False), bgcolor=BG),
+                        height=450, paper_bgcolor=BG, font=dict(color="#fff"),
+                        margin=dict(l=60, r=60, t=30, b=30))
+                    st.plotly_chart(fig_sim, use_container_width=True)
 
 
 # ── Footer ───────────────────────────────────────────────────────────
