@@ -330,9 +330,17 @@ def _fallback_search(query: str, data: pd.DataFrame):
         result = result[result["position_group"] == "MF"]
     elif any(w in q for w in ["defender", "back", "cb", "df"]):
         result = result[result["position_group"] == "DF"]
-    for league in ["premier league", "la liga", "bundesliga", "serie a", "ligue 1"]:
-        if league in q:
-            result = result[result["league_label"].str.lower() == league]
+    league_aliases = {
+        "premier league": "Premier League", "epl": "Premier League",
+        "pl": "Premier League", "la liga": "La Liga",
+        "bundesliga": "Bundesliga", "serie a": "Serie A",
+        "ligue 1": "Ligue 1",
+    }
+    for keyword, league_name in league_aliases.items():
+        if keyword in q:
+            result = result[result["league_label"] == league_name]
+            break
+      
     age_match = re.search(r'under (\d+)', q)
     if age_match:
         result = result[result["age"] <= int(age_match.group(1))]
@@ -848,10 +856,10 @@ Answer with specific player recommendations."""
                     )
                     st.markdown(answer)
                 else:
-                    st.warning("AI Scout unavailable. Using keyword search instead.")
+                    st.caption("🔍 Results via keyword search:")
                     _fallback_search(scout_query, filtered)
             except Exception:
-                st.warning("AI Scout unavailable. Using keyword search instead.")
+                st.caption("🔍 Results via keyword search:")
                 _fallback_search(scout_query, filtered)
 
 
