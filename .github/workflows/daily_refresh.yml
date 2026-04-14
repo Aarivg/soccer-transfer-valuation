@@ -6,8 +6,8 @@ name: Daily Data Refresh
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # 6 AM UTC daily
-  workflow_dispatch:        # manual trigger
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -23,29 +23,26 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Scrape FBref stats
-        run: python src/scrape_fbref.py --season 2425
-
       - name: Load Transfermarkt valuations
         run: python src/scrape_transfermarkt.py
 
       - name: Preprocess & merge
-        run: python src/preprocess.py --season 2425
+        run: python src/preprocess.py --season 2526
 
       - name: Train model & generate predictions
-        run: python src/model.py --season 2425
+        run: python src/model.py --season 2526
 
       - name: Commit updated data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/processed/*.csv data/processed/*.json data/raw/*.csv
+          git add data/processed/*.csv data/processed/*.json
           git diff --cached --quiet || git commit -m "🔄 Daily data refresh $(date -u +%Y-%m-%d)"
           git push
