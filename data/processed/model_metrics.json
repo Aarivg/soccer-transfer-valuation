@@ -1,26 +1,26 @@
 {
   "global": {
-    "r2": 0.46020774354369154,
-    "rmse_eur": 14709522.121690016,
-    "cv_r2_mean": 0.4466163893184435,
-    "cv_r2_std": 0.06563906620219247,
+    "r2": 0.47006913034046993,
+    "rmse_eur": 14347972.984922275,
+    "cv_r2_mean": 0.449136452583973,
+    "cv_r2_std": 0.06675888189056241,
     "features": [
-      "is_midfielder",
-      "is_elite_club",
-      "club_premium",
-      "contract_years_remaining",
       "age",
-      "league_prestige",
+      "is_midfielder",
+      "contract_years_remaining",
+      "is_elite_club",
       "is_forward",
-      "is_defender"
+      "club_premium",
+      "is_defender",
+      "league_prestige"
     ],
     "model_weight": 0.65,
     "max_gap_pct": 60
   },
   "position_models": {
     "FW": {
-      "r2": 0.43327052331595584,
-      "rmse_eur": 12844134.147860263,
+      "r2": 0.43006727882059703,
+      "rmse_eur": 13025702.842077905,
       "n_players": 308,
       "features": [
         "age",
