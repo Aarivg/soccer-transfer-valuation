@@ -37,10 +37,16 @@ jobs:
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
-          kaggle datasets download -d davidcariboo/player-scores -p data/raw --unzip --force
+          mkdir -p data/raw
+          kaggle datasets download -d davidcariboo/player-scores -f players.csv -p data/raw --unzip --force
+          kaggle datasets download -d davidcariboo/player-scores -f player_valuations.csv -p data/raw --unzip --force
+          kaggle datasets download -d davidcariboo/player-scores -f appearances.csv -p data/raw --unzip --force
 
       - name: Load Transfermarkt valuations
         run: python src/scrape_transfermarkt.py
+
+      - name: Aggregate season stats (games played, goals, assists)
+        run: python src/aggregate_appearances.py --season 2526
 
       - name: Preprocess & merge
         run: python src/preprocess.py --season 2526
@@ -52,6 +58,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/raw/*.csv data/processed/*.csv data/processed/*.json
+          git add data/raw/players.csv data/raw/player_valuations.csv data/processed/*.csv data/processed/*.json
           git diff --cached --quiet || git commit -m "🔄 Daily data refresh $(date -u +%Y-%m-%d)"
           git push
