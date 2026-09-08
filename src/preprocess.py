@@ -2,8 +2,10 @@
 preprocess.py — Merge FBref stats with Transfermarkt valuations.
 
 Fuzzy-matches player names, engineers features (per-90 stats, age buckets,
-league tiers, position encoding), log-transforms target, and creates
-a model-ready dataset.
+league tiers, position encoding), merges in season-level counting stats
+(games played, goals, assists, minutes — from appearances.csv via
+aggregate_appearances.py), log-transforms target, and creates a
+model-ready dataset.
 
 Usage:
     python src/preprocess.py
@@ -280,6 +282,43 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── Season-level counting stats (games played, goals, assists, etc.) ──
+def merge_season_stats(df: pd.DataFrame, proc_dir: str, season: str) -> pd.DataFrame:
+    """
+    Merge in per-player season totals produced by aggregate_appearances.py
+    (games_played, goals, assists, minutes_played, cards). Joined on the
+    Transfermarkt player_id, which both datasets share exactly — no fuzzy
+    matching needed for this part.
+    """
+    path = os.path.join(proc_dir, f"season_stats_{season}.csv")
+    if not os.path.exists(path):
+        print(f"  ⚠  Season stats not found at {path} — skipping "
+              f"(run aggregate_appearances.py first for games/goals features)")
+        return df
+
+    season_stats = pd.read_csv(path)
+
+    id_col = "tm_player_id" if "tm_player_id" in df.columns else (
+        "player_id" if "player_id" in df.columns else None
+    )
+    if id_col is None:
+        print("  ⚠  No player_id column found on merged dataset — "
+              "skipping season stats merge")
+        return df
+
+    before_cols = set(df.columns)
+    df = df.merge(
+        season_stats,
+        left_on=id_col, right_on="player_id",
+        how="left", suffixes=("", "_season"),
+    )
+    new_cols = [c for c in df.columns if c not in before_cols]
+    matched = df["games_played"].notna().sum() if "games_played" in df.columns else 0
+    print(f"  ✓ Merged season stats ({new_cols}): "
+          f"{matched}/{len(df)} players matched")
+    return df
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Preprocess & merge datasets")
@@ -314,6 +353,9 @@ def main():
 
     # ── Feature engineering ──────────────────────────────────────────
     dataset = engineer_features(merged)
+
+    # ── Merge season-level counting stats ─────────────────────────────
+    dataset = merge_season_stats(dataset, proc_dir, args.season)
 
     # ── Save ─────────────────────────────────────────────────────────
     out_path = os.path.join(proc_dir, f"model_dataset_{args.season}.csv")
