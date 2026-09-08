@@ -1,6 +1,8 @@
 # .github/workflows/daily_refresh.yml
-# Runs daily at 6 AM UTC — scrapes FBref, re-trains model, pushes updated data.
-# Also runs on manual trigger.
+# Runs daily at 6 AM UTC — pulls the latest Transfermarkt/Kaggle dataset,
+# reprocesses, retrains the model, and pushes updated data.
+# FBref stats still require a manual CSV export (see README limitations) —
+# this workflow does not touch scrape_fbref.py.
 
 name: Daily Data Refresh
 
@@ -29,6 +31,13 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+          pip install kaggle
+
+      - name: Download latest dataset from Kaggle
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: |
+          kaggle datasets download -d davidcariboo/player-scores -p data/raw --unzip --force
 
       - name: Load Transfermarkt valuations
         run: python src/scrape_transfermarkt.py
@@ -43,6 +52,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/processed/*.csv data/processed/*.json
+          git add data/raw/*.csv data/processed/*.csv data/processed/*.json
           git diff --cached --quiet || git commit -m "🔄 Daily data refresh $(date -u +%Y-%m-%d)"
           git push
