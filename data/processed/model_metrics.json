@@ -1,57 +1,76 @@
 {
   "global": {
-    "r2": 0.4593178110762066,
-    "rmse_eur": 14727900.849518165,
-    "cv_r2_mean": 0.44899845480081746,
-    "cv_r2_std": 0.06182669447616058,
+    "r2": 0.7341199274154258,
+    "rmse_eur": 11744833.31744901,
+    "cv_r2_mean": 0.7044599609523211,
+    "cv_r2_std": 0.011819558536492143,
     "features": [
+      "assists",
       "is_midfielder",
-      "league_prestige",
-      "is_forward",
+      "red_cards",
       "age",
       "club_premium",
+      "minutes_per_game",
+      "goals",
+      "is_forward",
+      "games_played",
+      "league_prestige",
+      "contract_years_remaining",
       "is_defender",
-      "is_elite_club",
-      "contract_years_remaining"
+      "minutes_played",
+      "goals_per_game",
+      "yellow_cards",
+      "is_elite_club"
     ],
     "model_weight": 0.65,
     "max_gap_pct": 60
   },
   "position_models": {
     "FW": {
-      "r2": 0.4262422831368927,
-      "rmse_eur": 12994953.83350091,
-      "n_players": 308,
+      "r2": 0.7154959915487695,
+      "rmse_eur": 11082131.425899673,
+      "n_players": 305,
       "features": [
         "age",
         "contract_years_remaining",
         "league_prestige",
         "is_elite_club",
-        "club_premium"
+        "club_premium",
+        "games_played",
+        "minutes_played",
+        "goals",
+        "goals_per_game"
       ]
     },
     "MF": {
-      "r2": 0.6534091623055329,
-      "rmse_eur": 15724535.579468934,
-      "n_players": 440,
+      "r2": 0.6556719548035624,
+      "rmse_eur": 10835906.71535966,
+      "n_players": 435,
       "features": [
         "age",
         "contract_years_remaining",
         "league_prestige",
         "is_elite_club",
-        "club_premium"
+        "club_premium",
+        "games_played",
+        "minutes_played",
+        "assists"
       ]
     },
     "DF": {
-      "r2": 0.5711379656852106,
-      "rmse_eur": 12846612.550427385,
-      "n_players": 536,
+      "r2": 0.6990504912852442,
+      "rmse_eur": 10062111.909274565,
+      "n_players": 533,
       "features": [
         "age",
         "contract_years_remaining",
         "league_prestige",
         "is_elite_club",
-        "club_premium"
+        "club_premium",
+        "games_played",
+        "minutes_played",
+        "yellow_cards",
+        "red_cards"
       ]
     }
   }
