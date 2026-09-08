@@ -9,6 +9,9 @@ Key improvements over v1:
   - Toned-down age/league multipliers
   - SHAP explainability + position-specific models
   - Confidence intervals via quantile regression
+  - Season-level availability stats (games played, goals, assists,
+    minutes) from Transfermarkt appearance data, alongside FBref's
+    per-90 rate stats
 
 Usage:
     python src/model.py
@@ -83,6 +86,21 @@ PERFORMANCE_FEATURES = [
     "carries_into_final_third_per90",
 ]
 
+# Season-level counting stats — availability and durability signal that
+# per-90 rate stats don't capture (a player who plays 35 games is valued
+# differently than one at the same per-90 rate over 10 games).
+# Sourced from appearances.csv via aggregate_appearances.py.
+AVAILABILITY_FEATURES = [
+    "games_played",
+    "minutes_played",
+    "goals",
+    "assists",
+    "goals_per_game",
+    "minutes_per_game",
+    "yellow_cards",
+    "red_cards",
+]
+
 POSITION_FEATURES = {
     "FW": [
         "goals_per90", "goals_pens_per90", "xg_per90", "npxg_per90",
@@ -91,6 +109,7 @@ POSITION_FEATURES = {
         "progressive_carries_per90", "successful_dribbles_per90",
         "age", "contract_years_remaining", "league_prestige",
         "is_elite_club", "club_premium",
+        "games_played", "minutes_played", "goals", "goals_per_game",
     ],
     "MF": [
         "goals_per90", "assists_per90",
@@ -101,6 +120,7 @@ POSITION_FEATURES = {
         "successful_dribbles_per90",
         "age", "contract_years_remaining", "league_prestige",
         "is_elite_club", "club_premium",
+        "games_played", "minutes_played", "assists",
     ],
     "DF": [
         "tackles_won_per90", "interceptions_per90",
@@ -110,10 +130,13 @@ POSITION_FEATURES = {
         "goals_per90", "assists_per90",
         "age", "contract_years_remaining", "league_prestige",
         "is_elite_club", "club_premium",
+        "games_played", "minutes_played", "yellow_cards", "red_cards",
     ],
 }
 
-ALL_FEATURES = list(set(CORE_FEATURES + PERFORMANCE_FEATURES))
+ALL_FEATURES = list(set(
+    CORE_FEATURES + PERFORMANCE_FEATURES + AVAILABILITY_FEATURES
+))
 
 
 def get_available_features(df: pd.DataFrame, wanted: list[str]) -> list[str]:
