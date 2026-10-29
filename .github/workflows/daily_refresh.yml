@@ -1,8 +1,16 @@
 # .github/workflows/daily_refresh.yml
-# Runs daily at 6 AM UTC — pulls the latest Transfermarkt/Kaggle dataset,
-# reprocesses, retrains the model, and pushes updated data.
-# FBref stats still require a manual CSV export (see README limitations) —
-# this workflow does not touch scrape_fbref.py.
+# Runs daily at 6 AM UTC — scrapes current Big 5 squads, market values and
+# contracts from Transfermarkt, reprocesses, retrains the model, and pushes
+# updated data.
+#
+# Performance stats are the 2025-26 FBref export already in data/raw/ (FBref
+# lost its advanced stats in January 2026, so there is no 2026-27 equivalent).
+# The Kaggle dataset this used to download stopped updating in July 2026; its
+# players.csv / player_valuations.csv stay in the repo as background data
+# and valuation history.
+#
+# If Transfermarkt blocks the scrape, scrape_tm_squads.py exits non-zero, the
+# job fails (GitHub emails the repo owner) and nothing is committed.
 
 name: Daily Data Refresh
 
@@ -14,9 +22,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: daily-refresh
+  cancel-in-progress: false
+
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repo
@@ -26,27 +39,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install kaggle
 
-      - name: Download latest dataset from Kaggle
-        env:
-          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-        run: |
-          mkdir -p data/raw
-          kaggle datasets download -d davidcariboo/player-scores -f players.csv -p data/raw --unzip --force
-          kaggle datasets download -d davidcariboo/player-scores -f player_valuations.csv -p data/raw --unzip --force
-          kaggle datasets download -d davidcariboo/player-scores -f appearances.csv -p data/raw --unzip --force
+      - name: Scrape current Big 5 squads & values from Transfermarkt
+        run: python src/scrape_tm_squads.py
 
-      - name: Load Transfermarkt valuations
+      - name: Build Transfermarkt player table
         run: python src/scrape_transfermarkt.py
-
-      - name: Aggregate season stats (games played, goals, assists)
-        run: python src/aggregate_appearances.py --season 2526
 
       - name: Preprocess & merge
         run: python src/preprocess.py --season 2526
@@ -58,6 +62,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/raw/players.csv data/raw/player_valuations.csv data/processed/*.csv data/processed/*.json
+          git add data/raw/tm_squads_current.csv data/raw/tm_valuations_scraped.csv \
+                  data/processed/*.csv data/processed/*.json
           git diff --cached --quiet || git commit -m "🔄 Daily data refresh $(date -u +%Y-%m-%d)"
           git push

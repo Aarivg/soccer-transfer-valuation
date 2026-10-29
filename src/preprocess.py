@@ -28,19 +28,26 @@ except ImportError:
 
 
 # ── Elite clubs that command premium transfer fees ───────────────────
-ELITE_CLUBS = {
-    # Tier 1: global super-clubs
-    "Real Madrid", "Barcelona", "Manchester City", "Paris Saint-Germain",
-    "Bayern Munich", "Bayern München",
-    # Tier 2: consistent CL contenders
-    "Liverpool", "Arsenal", "Chelsea", "Manchester United",
-    "Juventus", "Inter Milan", "AC Milan", "Atlético Madrid",
-    "Borussia Dortmund",
+# Matched exactly (not by substring, which wrongly caught e.g. "RCD Espanyol
+# Barcelona"). Both Transfermarkt and FBref spellings are listed.
+TIER1_CLUBS = {
+    "Real Madrid", "FC Barcelona", "Barcelona", "Manchester City",
+    "Paris Saint-Germain", "Paris S-G",
+    "FC Bayern Munich", "Bayern Munich", "Bayern München",
 }
 
-TIER1_CLUBS = {
-    "Real Madrid", "Barcelona", "Manchester City",
-    "Paris Saint-Germain", "Bayern Munich", "Bayern München",
+ELITE_CLUBS = TIER1_CLUBS | {
+    # Tier 2: consistent CL contenders
+    "Liverpool FC", "Liverpool", "Arsenal FC", "Arsenal", "Chelsea FC",
+    "Chelsea", "Manchester United", "Manchester Utd", "Juventus FC",
+    "Juventus", "Inter Milan", "Inter", "AC Milan", "Milan",
+    "Atlético de Madrid", "Atlético Madrid", "Borussia Dortmund", "Dortmund",
+}
+
+# Transfermarkt competition code → league name
+TM_LEAGUES = {
+    "GB1": "Premier League", "ES1": "La Liga", "L1": "Bundesliga",
+    "IT1": "Serie A", "FR1": "Ligue 1",
 }
 
 
@@ -52,10 +59,12 @@ def clean_name(name: str) -> str:
     import unicodedata
     name = unicodedata.normalize("NFKD", str(name))
     name = "".join(c for c in name if not unicodedata.combining(c))
-    name = name.lower().strip()
-    for remove in ["jr.", "jr", "sr.", "sr", "ii", "iii"]:
-        name = name.replace(remove, "")
-    return " ".join(name.split())
+    name = name.lower().strip().replace("-", " ")
+    # Drop suffixes as whole words only (a plain replace turned "Junior
+    # Firpo" or "Srdjan" into nonsense)
+    words = [w for w in name.split()
+             if w not in {"jr.", "jr", "sr.", "sr", "ii", "iii"}]
+    return " ".join(words)
 
 
 # ── Fuzzy matching ───────────────────────────────────────────────────
@@ -67,7 +76,10 @@ def fuzzy_match_players(
     threshold: int = 80,
 ) -> pd.DataFrame:
     """
-    Match FBref players to Transfermarkt players by name + squad.
+    Match FBref players to Transfermarkt players by name, restricted to
+    candidates whose birth year is within one year of FBref's "born" — so a
+    player who has left the Big 5 isn't matched to someone else with a
+    similar name.
     """
     print("🔗 Fuzzy-matching players...")
 
@@ -75,8 +87,10 @@ def fuzzy_match_players(
     tm_df = tm_df.copy()
     fbref_df["_clean_name"] = fbref_df[fbref_name_col].apply(clean_name)
     tm_df["_clean_name"] = tm_df[tm_name_col].apply(clean_name)
+    tm_df["_birth_year"] = pd.to_datetime(
+        tm_df.get("date_of_birth"), errors="coerce").dt.year
 
-    tm_names = tm_df["_clean_name"].dropna().unique().tolist()
+    all_tm_names = tm_df["_clean_name"].dropna().unique().tolist()
 
     matches = []
     unmatched = 0
@@ -87,18 +101,41 @@ def fuzzy_match_players(
             unmatched += 1
             continue
 
+        born = pd.to_numeric(row.get("born"), errors="coerce")
+        if pd.notna(born) and tm_df["_birth_year"].notna().any():
+            pool = tm_df[(tm_df["_birth_year"] - born).abs() <= 1]
+            tm_names = pool["_clean_name"].dropna().unique().tolist()
+        else:
+            pool, tm_names = tm_df, all_tm_names
+
         if USE_RAPIDFUZZ:
             result = rfprocess.extractOne(
                 name, tm_names,
                 scorer=fuzz.token_sort_ratio,
                 score_cutoff=threshold,
             )
+            if result is None and pool is not tm_df:
+                # Second pass for short/long name variants ("Max Kilman" vs
+                # "Maximilian Kilman", "Cucho" vs "Cucho Hernández"). Only safe
+                # because the pool is already limited to the same birth year;
+                # one-word names must also be at a similarly named club.
+                loose = rfprocess.extractOne(
+                    name, tm_names, scorer=fuzz.token_set_ratio,
+                    score_cutoff=90,
+                )
+                if loose:
+                    cand = pool[pool["_clean_name"] == loose[0]].iloc[0]
+                    club_ok = fuzz.token_set_ratio(
+                        str(row.get("squad", "")),
+                        str(cand.get("current_club_name", ""))) >= 60
+                    if len(name.split()) > 1 or club_ok:
+                        result = loose
             if result:
                 best_name, score, _ = result
-                tm_match = tm_df[tm_df["_clean_name"] == best_name].iloc[0]
+                tm_match = pool[pool["_clean_name"] == best_name].iloc[0]
                 merged_row = {**row.to_dict(), **{
                     f"tm_{k}": v for k, v in tm_match.to_dict().items()
-                    if k != "_clean_name"
+                    if k not in ("_clean_name", "_birth_year")
                 }}
                 merged_row["match_score"] = score
                 matches.append(merged_row)
@@ -108,11 +145,11 @@ def fuzzy_match_players(
             close = get_close_matches(name, tm_names, n=1, cutoff=0.7)
             if close:
                 best_name = close[0]
-                tm_match = tm_df[tm_df["_clean_name"] == best_name].iloc[0]
+                tm_match = pool[pool["_clean_name"] == best_name].iloc[0]
                 score = SequenceMatcher(None, name, best_name).ratio() * 100
                 merged_row = {**row.to_dict(), **{
                     f"tm_{k}": v for k, v in tm_match.to_dict().items()
-                    if k != "_clean_name"
+                    if k not in ("_clean_name", "_birth_year")
                 }}
                 merged_row["match_score"] = score
                 matches.append(merged_row)
@@ -254,13 +291,9 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
             break
 
     if squad_col:
-        df["is_elite_club"] = df[squad_col].astype(str).apply(
-            lambda x: any(club.lower() in x.lower() for club in ELITE_CLUBS)
-        ).astype(int)
-
-        df["is_tier1_club"] = df[squad_col].astype(str).apply(
-            lambda x: any(club.lower() in x.lower() for club in TIER1_CLUBS)
-        ).astype(int)
+        club = df[squad_col].astype(str).str.strip()
+        df["is_elite_club"] = club.isin(ELITE_CLUBS).astype(int)
+        df["is_tier1_club"] = club.isin(TIER1_CLUBS).astype(int)
 
         # Club premium multiplier
         df["club_premium"] = 1.0
@@ -348,8 +381,43 @@ def main():
     tm = pd.read_csv(tm_path)
     print(f"💰 Transfermarkt: {len(tm)} players")
 
+    # The FBref export contains some players twice (identical rows)
+    before = len(fbref)
+    fbref = fbref.drop_duplicates()
+    if len(fbref) < before:
+        print(f"  → Dropped {before - len(fbref)} duplicate FBref rows")
+
     # ── Fuzzy match & merge ──────────────────────────────────────────
     merged = fuzzy_match_players(fbref, tm)
+
+    # A player who moved mid-season has one FBref row per club; keep the
+    # stint with the most minutes so each Transfermarkt player appears once
+    if "tm_player_id" in merged.columns:
+        mins = pd.to_numeric(merged.get("min", pd.Series(dtype=str))
+                             .astype(str).str.replace(",", ""), errors="coerce")
+        merged = (merged.assign(_mins=mins)
+                  .sort_values("_mins", ascending=False)
+                  .drop_duplicates(subset=["tm_player_id"], keep="first")
+                  .drop(columns="_mins"))
+        print(f"  → {len(merged)} unique players after removing repeat matches")
+
+    # ── Current club & league come from Transfermarkt ────────────────
+    # FBref's squad/comp describe where the player spent 2025-26; the
+    # market value is today's, so club-based features (and what the app
+    # shows) should reflect the club he plays for now.
+    if "tm_current_club_name" in merged.columns:
+        merged["squad_2526"] = merged.get("squad")
+        merged["comp_2526"] = merged.get("comp")
+        merged["squad"] = merged["tm_current_club_name"].fillna(merged["squad"])
+        code = merged.get("tm_current_club_domestic_competition_id")
+        if code is not None:
+            merged["comp"] = code.map(TM_LEAGUES).fillna(merged["comp"])
+        joined = pd.to_datetime(merged.get("tm_joined_date"), errors="coerce")
+        season = pd.to_numeric(merged.get("tm_season_id"), errors="coerce").max()
+        if pd.notna(season):
+            new = int((joined >= f"{int(season)}-07-01").sum())
+            print(f"  → Using current clubs: {new} players joined their "
+                  f"club since July {int(season)}")
 
     # ── Feature engineering ──────────────────────────────────────────
     dataset = engineer_features(merged)

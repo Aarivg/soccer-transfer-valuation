@@ -2,7 +2,7 @@
 
 A full-stack data science project that predicts player market values from on-pitch performance stats and compares them to actual Transfermarkt valuations — surfacing the most **undervalued** and **overvalued** players across the Big 5 European Leagues.
 
-### 🔗 [Live App](https://soccer-transfer-valuation.streamlit.app/) · [Dataset: FBref](https://fbref.com/) · [Dataset: Transfermarkt via Kaggle](https://www.kaggle.com/datasets/davidcariboo/player-scores)
+### 🔗 [Live App](https://soccer-transfer-valuation.streamlit.app/) · [Dataset: FBref](https://fbref.com/) · [Dataset: Transfermarkt](https://www.transfermarkt.com/)
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat&logo=python&logoColor=white)
 ![XGBoost](https://img.shields.io/badge/XGBoost-Gradient_Boosting-orange?style=flat)
@@ -59,12 +59,15 @@ Select any player to find statistically similar players using cosine similarity 
 | Source | What | Method |
 |--------|------|--------|
 | **FBref** | Per-90 stats: goals, assists, xG, xAG, progressive passes/carries, tackles, interceptions, shots, dribbles | Manual CSV export (6 stat tables) |
-| **Transfermarkt** (Kaggle) | Market values, contract expiry, player metadata, historical valuations, photos | `player_valuations.csv` + `players.csv` |
+| **Transfermarkt** (live) | Current club, market value, contract expiry, position, photo for every Big 5 squad player | Daily scrape of all 96 Big 5 squad pages (`scrape_tm_squads.py`) |
+| **Transfermarkt** (Kaggle archive) | Valuation history to June 2026, caps, birthplace, peak value | `player_valuations.csv` + `players.csv` ([dataset](https://www.kaggle.com/datasets/davidcariboo/player-scores), no longer updated) |
 
-**Coverage:** 1,284 outfield players with ≥900 minutes across all Big 5 leagues (Premier League, La Liga, Bundesliga, Serie A, Ligue 1) — 2025-26 season.
+**Coverage:** outfield players with ≥900 minutes in the Big 5 leagues (Premier League, La Liga, Bundesliga, Serie A, Ligue 1) in 2025-26 who are still at a Big 5 club, valued at today's Transfermarkt price and shown at their current club.
+
+**Why 2025-26 stats:** FBref lost its advanced stats (xG, progressive passes, shot-creating actions) in January 2026, so there is no 2026-27 equivalent. The model predicts each player's current value from his last full season. Players who joined the Big 5 from other leagues this summer have no 2025-26 Big 5 stats and aren't included.
 
 ### 2. Preprocessing
-- Fuzzy name matching across FBref and Transfermarkt (96.3% match rate via `rapidfuzz`)
+- Fuzzy name matching across FBref and Transfermarkt via `rapidfuzz`, restricted to the same birth year (±1) so a player who left the Big 5 can't be matched to a namesake
 - Per-90 stat computation for counting stats
 - Feature engineering: age potential multiplier, league prestige, elite club premium, position encoding
 - Log-transform of market values (right-skewed distribution)
@@ -98,7 +101,7 @@ Select any player to find statistically similar players using cosine similarity 
 - **AI:** Claude API (Anthropic) for natural language scouting
 - **Similarity:** scikit-learn (cosine similarity, StandardScaler)
 - **Deployment:** Streamlit Community Cloud (auto-deploys from GitHub)
-- **CI/CD:** GitHub Actions (daily Transfermarkt data refresh)
+- **CI/CD:** GitHub Actions (daily Transfermarkt scrape + retrain)
 
 ---
 
@@ -109,11 +112,12 @@ soccer-transfer-valuation/
 ├── .github/workflows/
 │   └── daily_refresh.yml       # Daily auto-refresh pipeline
 ├── data/
-│   ├── raw/                    # FBref CSVs + Kaggle Transfermarkt files
+│   ├── raw/                    # FBref CSVs, live Transfermarkt squads, Kaggle archive
 │   └── processed/              # Merged datasets + model output
 ├── src/
 │   ├── scrape_fbref.py         # Loads & merges 6 FBref stat tables
-│   ├── scrape_transfermarkt.py # Processes Kaggle Transfermarkt CSVs
+│   ├── scrape_tm_squads.py     # Scrapes current Big 5 squads + values from Transfermarkt
+│   ├── scrape_transfermarkt.py # Builds one row per player (live squads + Kaggle metadata)
 │   ├── preprocess.py           # Fuzzy matching + feature engineering
 │   ├── model.py                # XGBoost training + SHAP + predictions
 │   └── app.py                  # Streamlit dashboard (7 tabs, 950+ lines)
@@ -137,7 +141,8 @@ pip install -r requirements.txt
 
 # Run the pipeline
 python src/scrape_fbref.py --season 2526    # loads local FBref CSVs
-python src/scrape_transfermarkt.py           # processes Kaggle data
+python src/scrape_tm_squads.py               # current squads + values (~100 requests, a few minutes)
+python src/scrape_transfermarkt.py           # one row per player
 python src/preprocess.py --season 2526       # merge + feature engineering
 python src/model.py --season 2526            # train + predict
 
@@ -164,9 +169,10 @@ streamlit run src/app.py
 - No xG from open play vs set pieces (FBref granularity)
 - No injury history or availability data
 - No brand/social media metrics
-- Static FBref data (manual CSV refresh needed)
+- Performance stats are from 2025-26 (FBref no longer publishes advanced stats)
 - Transfermarkt valuations update every 3-6 months per league
-- 6.6% of players unmatched due to name encoding differences
+- The daily scrape fails, and keeps the last good data, if Transfermarkt blocks the request
+- ~3% of players unmatched due to name differences between FBref and Transfermarkt
 
 ---
 

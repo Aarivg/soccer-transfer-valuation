@@ -56,7 +56,8 @@ else:
     SEASON = "Unknown"
 
 METRICS_PATH = PROCESSED_DIR / "model_metrics.json"
-VALUATIONS_PATH = RAW_DIR / "player_valuations.csv"
+VALUATIONS_PATH = RAW_DIR / "player_valuations.csv"            # Kaggle, to Jun 2026
+SCRAPED_VALUATIONS_PATH = RAW_DIR / "tm_valuations_scraped.csv"  # live, daily
 
 LEAGUE_COLORS = {
     "Premier League": "#3d195b",
@@ -138,8 +139,10 @@ def load_metrics() -> dict:
 
 @st.cache_data
 def load_valuations_history() -> pd.DataFrame:
-    if VALUATIONS_PATH.exists():
-        v = pd.read_csv(VALUATIONS_PATH)
+    parts = [pd.read_csv(p, usecols=["player_id", "date", "market_value_in_eur"])
+             for p in (VALUATIONS_PATH, SCRAPED_VALUATIONS_PATH) if p.exists()]
+    if parts:
+        v = pd.concat(parts, ignore_index=True)
         v["date"] = pd.to_datetime(v["date"], errors="coerce")
         v["value_m"] = (pd.to_numeric(v["market_value_in_eur"],
                                        errors="coerce") / 1e6).round(1)
@@ -266,14 +269,19 @@ st.markdown("""
     </h1>
 </div>
 """, unsafe_allow_html=True)
+values_as_of = pd.to_datetime(df.get("tm_date"), errors="coerce").max()
+values_label = values_as_of.strftime("%B %d, %Y") if pd.notna(values_as_of) else None
+
 st.caption(
-    f"Comparing predicted market values (from on-pitch stats) vs actual "
-    f"Transfermarkt valuations · **{SEASON}** · Big 5 European Leagues · "
+    f"Comparing predicted market values (from **{SEASON}** on-pitch stats) vs "
+    f"current Transfermarkt valuations and clubs · Big 5 European Leagues · "
     f"**{len(df)}** players"
 )
 
-# Last updated
-if DATA_PATH and DATA_PATH.exists():
+# Last updated = date of the Transfermarkt values shown
+if values_label:
+    st.caption(f"📅 Market values and clubs as of {values_label}")
+elif DATA_PATH and DATA_PATH.exists():
     mod_time = datetime.fromtimestamp(DATA_PATH.stat().st_mtime)
     st.caption(f"📅 Last updated: {mod_time.strftime('%B %d, %Y')}")
 
@@ -449,6 +457,18 @@ with tab1:
 
             st.markdown(f"### {sel}")
             st.caption(f"**{pos_label}** · {squad} · {league} · {nationality}")
+
+            # Summer signings: say so, since the stats are from his old club
+            joined = pd.to_datetime(row.get("tm_joined_date"), errors="coerce")
+            season_id = pd.to_numeric(row.get("tm_season_id"), errors="coerce")
+            if pd.notna(joined) and pd.notna(season_id) and \
+                    joined >= pd.Timestamp(int(season_id), 7, 1):
+                prev = next((str(v) for v in (row.get("squad_2526"),
+                                              row.get("tm_signed_from"))
+                             if pd.notna(v) and str(v).strip()), "")
+                st.caption(
+                    f"🆕 Joined {squad} on {joined.strftime('%d %b %Y')}"
+                    + (f" · {SEASON} stats are from {prev}" if prev else ""))
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Actual Value", f"€{row['actual_m']:.1f}M")
