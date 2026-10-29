@@ -178,7 +178,10 @@ def parse_squad_page(html: str) -> list[dict]:
             if len(inner_rows) > 1 else ""
         nats = [i.get("title") or i.get("alt") or ""
                 for i in tds[3].find_all("img")]
-        signed_from = tds[7].find("img")
+        # The club crest's title is the selling club; a second icon can carry
+        # the fee (": Ablöse €5.8M"), which is not a club name
+        crests = [i.get("title", "") for i in tds[7].find_all("img")]
+        signed_from = next((c for c in crests if c and not c.startswith(":")), "")
         players.append({
             "player_id": pid,
             "player_name": link.get_text(" ", strip=True),
@@ -190,7 +193,7 @@ def parse_squad_page(html: str) -> list[dict]:
             "height_in_cm": parse_height(tds[4].get_text(" ", strip=True)),
             "foot": tds[5].get_text(" ", strip=True) or None,
             "joined_date": parse_date(tds[6].get_text(" ", strip=True)),
-            "signed_from": (signed_from.get("title") or "") if signed_from else "",
+            "signed_from": signed_from,
             "contract_expiration_date": parse_date(tds[8].get_text(" ", strip=True)),
             "market_value_in_eur": parse_market_value(tds[9].get_text(" ", strip=True)),
             "image_url": img_src(cell.find("img")),
@@ -261,6 +264,67 @@ def scrape(season_id: int, delay: float) -> pd.DataFrame:
     return df
 
 
+# ── Import from a browser export ─────────────────────────────────────
+# Transfermarkt serves cloud/datacenter IPs (e.g. GitHub Actions) a bot
+# challenge instead of data, while a normal browser session loads the same
+# pages fine. A browser export is a TSV of the raw squad-table cells, one
+# player per line, in EXPORT_COLS order; it goes through the same parsing
+# and completeness checks as a direct scrape.
+EXPORT_COLS = ["player_id", "player_name", "player_slug", "sub_position",
+               "dob_raw", "nationalities", "height_raw", "foot", "joined_raw",
+               "signed_from", "contract_raw", "value_raw", "image_file",
+               "current_club_id", "current_club_name",
+               "current_club_domestic_competition_id"]
+
+
+def squads_from_export(path: str, season_id: int) -> pd.DataFrame:
+    raw = pd.read_csv(path, sep="\t", header=None, names=EXPORT_COLS,
+                      dtype=str, keep_default_na=False, quoting=3)
+    nats = raw["nationalities"].str.split("|")
+    df = pd.DataFrame({
+        "player_id": raw["player_id"].astype(int),
+        "player_name": raw["player_name"],
+        "sub_position": raw["sub_position"],
+        "position": raw["sub_position"].map(POSITION_GROUP).fillna("Missing"),
+        "date_of_birth": raw["dob_raw"].map(parse_date),
+        "country_of_citizenship": nats.str[0].fillna(""),
+        "second_citizenship": nats.str[1].fillna(""),
+        "height_in_cm": raw["height_raw"].map(parse_height),
+        "foot": raw["foot"].replace("", None),
+        "joined_date": raw["joined_raw"].map(parse_date),
+        "signed_from": raw["signed_from"].where(
+            ~raw["signed_from"].str.startswith(":"), ""),
+        "contract_expiration_date": raw["contract_raw"].map(parse_date),
+        "market_value_in_eur": raw["value_raw"].map(parse_market_value),
+        "image_url": raw["image_file"].map(
+            lambda f: f"https://img.a.transfermarkt.technology/portrait/header/{f}"
+            if f else ""),
+        "url": BASE_URL + "/" + raw["player_slug"] + "/profil/spieler/"
+               + raw["player_id"],
+        "current_club_id": raw["current_club_id"].astype(int),
+        "current_club_name": raw["current_club_name"],
+        "current_club_domestic_competition_id":
+            raw["current_club_domestic_competition_id"],
+    })
+    # Same completeness checks as a live scrape
+    clubs = df.groupby(["current_club_domestic_competition_id",
+                        "current_club_id"]).agg(
+        n=("player_id", "size"), valued=("market_value_in_eur", "count"))
+    for code, need in MIN_CLUBS.items():
+        have = (clubs.index.get_level_values(0) == code).sum()
+        if have < need:
+            raise BlockedError(f"{code}: export has {have} clubs (expected {need})")
+    thin = clubs[(clubs.n < MIN_PLAYERS_PER_CLUB) |
+                 (clubs.valued < MIN_PLAYERS_PER_CLUB // 2)]
+    if len(thin):
+        raise BlockedError(f"incomplete clubs in export: {thin.index.tolist()}")
+    df = df.drop_duplicates(subset=["player_id"], keep="first")
+    df["scraped_at"] = date.today().isoformat()
+    df["season_id"] = season_id
+    print(f"✅ Imported {len(df)} players across {df.current_club_id.nunique()} clubs")
+    return df
+
+
 # ── Valuation history ────────────────────────────────────────────────
 HISTORY_COLS = ["player_id", "date", "market_value_in_eur", "current_club_name",
                 "current_club_id", "player_club_domestic_competition_id"]
@@ -305,12 +369,19 @@ def main():
     ap.add_argument("--delay", type=float, default=3.0,
                     help="Base seconds between requests (a random 0–delay is added)")
     ap.add_argument("--raw-dir", default=os.path.join(os.path.dirname(__file__), "..", "data", "raw"))
+    ap.add_argument("--from-export", metavar="TSV",
+                    help="Import a browser export of the squad tables instead of scraping")
     args = ap.parse_args()
 
     season_id = args.season_id or current_season_id()
-    print(f"🔎 Scraping Transfermarkt Big 5 squads, season {season_id}/{str(season_id + 1)[-2:]}")
     try:
-        squads = scrape(season_id, args.delay)
+        if args.from_export:
+            print(f"📥 Importing {args.from_export} (season {season_id})")
+            squads = squads_from_export(args.from_export, season_id)
+        else:
+            print(f"🔎 Scraping Transfermarkt Big 5 squads, season "
+                  f"{season_id}/{str(season_id + 1)[-2:]}")
+            squads = scrape(season_id, args.delay)
     except BlockedError as e:
         print(f"\n❌ Scrape aborted, nothing written: {e}")
         print("   Transfermarkt is most likely blocking this client. Existing data is untouched.")

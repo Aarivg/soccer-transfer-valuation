@@ -1,29 +1,33 @@
 # .github/workflows/daily_refresh.yml
-# Runs daily at 6 AM UTC — scrapes current Big 5 squads, market values and
-# contracts from Transfermarkt, reprocesses, retrains the model, and pushes
-# updated data.
+# Refreshes current Big 5 squads, market values and contracts from
+# Transfermarkt, reprocesses, retrains the model, and commits the new data.
+#
+# Transfermarkt answers GitHub's servers with a bot check (HTTP 202) instead
+# of data, so the squads come from a browser export: run
+# tools/export_squads.js in Chrome and commit the result as
+# data/raw/tm_browser_export.tsv on main. That push starts this workflow,
+# which imports the export, retrains, commits the outputs and removes the
+# export file. Running the workflow by hand without an export tries a direct
+# scrape, which fails safely (nothing is committed) while the block lasts.
 #
 # Performance stats are the 2025-26 FBref export already in data/raw/ (FBref
-# lost its advanced stats in January 2026, so there is no 2026-27 equivalent).
-# The Kaggle dataset this used to download stopped updating in July 2026; its
-# players.csv / player_valuations.csv stay in the repo as background data
-# and valuation history.
-#
-# If Transfermarkt blocks the scrape, scrape_tm_squads.py exits non-zero, the
-# job fails (GitHub emails the repo owner) and nothing is committed.
+# lost its advanced stats in January 2026). The Kaggle dataset this used to
+# download stopped updating in July 2026; its files stay in the repo as
+# background data and valuation history.
 
-name: Daily Data Refresh
+name: Data Refresh
 
 on:
-  schedule:
-    - cron: '0 6 * * *'
+  push:
+    branches: [main]
+    paths: ['data/raw/tm_browser_export.tsv']
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: daily-refresh
+  group: data-refresh
   cancel-in-progress: false
 
 jobs:
@@ -46,8 +50,14 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Scrape current Big 5 squads & values from Transfermarkt
-        run: python src/scrape_tm_squads.py
+      - name: Get current Big 5 squads & values
+        run: |
+          if [ -f data/raw/tm_browser_export.tsv ]; then
+            python src/scrape_tm_squads.py --from-export data/raw/tm_browser_export.tsv
+            git rm -q data/raw/tm_browser_export.tsv
+          else
+            python src/scrape_tm_squads.py
+          fi
 
       - name: Build Transfermarkt player table
         run: python src/scrape_transfermarkt.py
@@ -64,5 +74,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/raw/tm_squads_current.csv data/raw/tm_valuations_scraped.csv \
                   data/processed/*.csv data/processed/*.json
-          git diff --cached --quiet || git commit -m "🔄 Daily data refresh $(date -u +%Y-%m-%d)"
+          git diff --cached --quiet || git commit -m "🔄 Data refresh $(date -u +%Y-%m-%d)"
           git push

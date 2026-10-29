@@ -101,7 +101,7 @@ Select any player to find statistically similar players using cosine similarity 
 - **AI:** Claude API (Anthropic) for natural language scouting
 - **Similarity:** scikit-learn (cosine similarity, StandardScaler)
 - **Deployment:** Streamlit Community Cloud (auto-deploys from GitHub)
-- **CI/CD:** GitHub Actions (daily Transfermarkt scrape + retrain)
+- **CI/CD:** GitHub Actions (imports Transfermarkt exports, retrains, commits new data)
 
 ---
 
@@ -110,7 +110,7 @@ Select any player to find statistically similar players using cosine similarity 
 ```
 soccer-transfer-valuation/
 ├── .github/workflows/
-│   └── daily_refresh.yml       # Daily auto-refresh pipeline
+│   └── daily_refresh.yml       # Data refresh pipeline (runs on a new export)
 ├── data/
 │   ├── raw/                    # FBref CSVs, live Transfermarkt squads, Kaggle archive
 │   └── processed/              # Merged datasets + model output
@@ -121,9 +121,21 @@ soccer-transfer-valuation/
 │   ├── preprocess.py           # Fuzzy matching + feature engineering
 │   ├── model.py                # XGBoost training + SHAP + predictions
 │   └── app.py                  # Streamlit dashboard (7 tabs, 950+ lines)
+├── tools/
+│   └── export_squads.js        # Browser export of current Big 5 squads
 ├── requirements.txt
 └── README.md
 ```
+
+---
+
+## Refreshing the Data
+
+Transfermarkt blocks GitHub's servers (it serves a bot check instead of data), so new squads and values come from a normal browser:
+
+1. Open [transfermarkt.com](https://www.transfermarkt.com) in Chrome, open DevTools (Cmd+Option+J), paste [`tools/export_squads.js`](tools/export_squads.js) into the Console and press Enter. After ~4 minutes it copies all 96 Big 5 squads to your clipboard.
+2. On GitHub, add a file at `data/raw/tm_browser_export.tsv` on `main`, paste, and commit.
+3. The **Data Refresh** workflow imports it, retrains the model, commits the new data and deletes the export. Streamlit redeploys automatically, and the app shows the date the values are from.
 
 ---
 
@@ -171,7 +183,7 @@ streamlit run src/app.py
 - No brand/social media metrics
 - Performance stats are from 2025-26 (FBref no longer publishes advanced stats)
 - Transfermarkt valuations update every 3-6 months per league
-- The daily scrape fails, and keeps the last good data, if Transfermarkt blocks the request
+- Values refresh when a new Transfermarkt export is committed (GitHub's servers are blocked from scraping it directly)
 - ~3% of players unmatched due to name differences between FBref and Transfermarkt
 
 ---

@@ -196,6 +196,13 @@ def load_live_squads(data_dir: str) -> pd.DataFrame | None:
                  if c not in LIVE_FIELDS and c not in
                  ("name", "market_value_in_eur", "last_season")]
         squads = squads.merge(players[extra], on="player_id", how="left")
+        # Lazy-loaded photos don't always come through the scrape; fall
+        # back to the archived photo for the same player
+        old_img = squads["player_id"].map(
+            players.set_index("player_id")["image_url"]
+            .str.split("?").str[0])
+        missing = squads["image_url"].fillna("").eq("")
+        squads.loc[missing, "image_url"] = old_img[missing]
     except FileNotFoundError:
         print("  ⚠  players.csv not found — using scraped fields only")
 
