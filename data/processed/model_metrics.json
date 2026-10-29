@@ -1,36 +1,56 @@
 {
   "global": {
-    "r2": 0.7414842534575503,
-    "rmse_eur": 15131866.377680168,
-    "cv_r2_mean": 0.7118895218658128,
-    "cv_r2_std": 0.05527582884832786,
+    "r2": 0.7617157921138086,
+    "rmse_eur": 12320882.485532383,
+    "cv_r2_mean": 0.7184952420004037,
+    "cv_r2_std": 0.05192090542906872,
     "features": [
-      "minutes_played",
-      "minutes_per_game",
-      "red_cards",
-      "games_played",
-      "assists",
-      "club_premium",
-      "is_defender",
-      "contract_years_remaining",
-      "is_midfielder",
-      "is_forward",
-      "yellow_cards",
-      "goals",
-      "age",
+      "league_prestige",
       "is_elite_club",
+      "ga_per90",
+      "is_forward",
+      "shots_per90",
       "goals_per_game",
-      "league_prestige"
+      "is_defender",
+      "minutes_per_game",
+      "club_premium",
+      "yellow_cards",
+      "red_cards",
+      "starts_pct",
+      "assists",
+      "is_midfielder",
+      "minutes_played",
+      "contract_years_remaining",
+      "shot_accuracy",
+      "np_ga_per90",
+      "age",
+      "goals_per90",
+      "np_goals_per90",
+      "games_played",
+      "shots_on_target_per90",
+      "goals_per_shot",
+      "assists_per90",
+      "goals"
     ],
     "model_weight": 0.65,
     "max_gap_pct": 60
   },
   "position_models": {
     "FW": {
-      "r2": 0.632772168594508,
-      "rmse_eur": 22039297.031084213,
-      "n_players": 244,
+      "r2": 0.6735227114489801,
+      "rmse_eur": 23421109.551033817,
+      "n_players": 245,
       "features": [
+        "goals_per90",
+        "np_goals_per90",
+        "assists_per90",
+        "ga_per90",
+        "shots_per90",
+        "shots_on_target_per90",
+        "shot_accuracy",
+        "goals_per_shot",
+        "goals",
+        "goals_per_game",
         "age",
         "contract_years_remaining",
         "league_prestige",
@@ -38,15 +58,21 @@
         "club_premium",
         "games_played",
         "minutes_played",
-        "goals",
-        "goals_per_game"
+        "starts_pct"
       ]
     },
     "MF": {
-      "r2": 0.7016812074541041,
-      "rmse_eur": 18151692.16887959,
+      "r2": 0.7396957594301122,
+      "rmse_eur": 17779780.0290646,
       "n_players": 349,
       "features": [
+        "goals_per90",
+        "assists_per90",
+        "ga_per90",
+        "np_ga_per90",
+        "shots_per90",
+        "shots_on_target_per90",
+        "assists",
         "age",
         "contract_years_remaining",
         "league_prestige",
@@ -54,14 +80,19 @@
         "club_premium",
         "games_played",
         "minutes_played",
-        "assists"
+        "starts_pct"
       ]
     },
     "DF": {
-      "r2": 0.6949143433305502,
-      "rmse_eur": 13462947.473211395,
+      "r2": 0.7156730855536804,
+      "rmse_eur": 12277353.255618991,
       "n_players": 425,
       "features": [
+        "goals_per90",
+        "assists_per90",
+        "ga_per90",
+        "yellow_cards",
+        "red_cards",
         "age",
         "contract_years_remaining",
         "league_prestige",
@@ -69,8 +100,7 @@
         "club_premium",
         "games_played",
         "minutes_played",
-        "yellow_cards",
-        "red_cards"
+        "starts_pct"
       ]
     }
   }
