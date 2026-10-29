@@ -101,8 +101,15 @@ CARD = "#1a1d24"
 
 
 # ── Data loading ─────────────────────────────────────────────────────
+def file_sig(*paths) -> tuple:
+    """Changes whenever a data file changes, so the caches below reload
+    after a data refresh is deployed instead of serving stale data."""
+    return tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size)
+                 for p in paths if p is not None and p.exists())
+
+
 @st.cache_data
-def load_data() -> pd.DataFrame:
+def load_data(sig: tuple = ()) -> pd.DataFrame:
     if DATA_PATH is None:
         return pd.DataFrame()
     df = pd.read_csv(DATA_PATH)
@@ -130,7 +137,7 @@ def load_data() -> pd.DataFrame:
 
 
 @st.cache_data
-def load_metrics() -> dict:
+def load_metrics(sig: tuple = ()) -> dict:
     if METRICS_PATH.exists():
         with open(METRICS_PATH) as f:
             return json.load(f)
@@ -138,7 +145,7 @@ def load_metrics() -> dict:
 
 
 @st.cache_data
-def load_valuations_history() -> pd.DataFrame:
+def load_valuations_history(sig: tuple = ()) -> pd.DataFrame:
     parts = [pd.read_csv(p, usecols=["player_id", "date", "market_value_in_eur"])
              for p in (VALUATIONS_PATH, SCRAPED_VALUATIONS_PATH) if p.exists()]
     if parts:
@@ -150,9 +157,10 @@ def load_valuations_history() -> pd.DataFrame:
     return pd.DataFrame()
 
 
-df = load_data()
-metrics = load_metrics()
-val_history = load_valuations_history()
+df = load_data(file_sig(DATA_PATH))
+metrics = load_metrics(file_sig(METRICS_PATH))
+val_history = load_valuations_history(
+    file_sig(VALUATIONS_PATH, SCRAPED_VALUATIONS_PATH))
 
 if df.empty:
     st.error("No data found. Run the pipeline first.")
