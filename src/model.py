@@ -25,7 +25,8 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.base import clone
+from sklearn.model_selection import KFold, train_test_split, cross_val_score
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -58,6 +59,23 @@ MODEL_WEIGHT = 0.65
 # Maximum percentage a player can be under/overvalued
 MAX_GAP_PCT = 60  # ±60%
 
+# Elite output boost. Tree models can't predict far above the most
+# expensive players they've seen, so the very best producers get squashed
+# toward the pack. Forwards and midfielders whose non-penalty goals +
+# assists per 90 rank in the top 2% / 5% / 10% of their position get this
+# multiplier.
+ELITE_OUTPUT_BOOST = [(0.98, 1.15), (0.95, 1.10), (0.90, 1.05)]
+ELITE_OUTPUT_MIN_90S = 15  # need a real sample (≈1,350 minutes)
+
+# Elite producers age more slowly in value terms: for them the 31+ / 28-30
+# age discount is floored at this level instead of 0.85 / 0.93
+ELITE_AGE_FLOOR = 0.95
+PRIME_AGE = 29
+
+# Star power ("outside soccer" profile): international caps as a proxy for
+# global profile, marketability and shirt sales
+STAR_POWER = [(100, 1.08), (50, 1.04)]
+
 
 # ── Feature sets ─────────────────────────────────────────────────────
 CORE_FEATURES = [
@@ -68,22 +86,15 @@ CORE_FEATURES = [
     "is_elite_club", "club_premium",
 ]
 
+# FBref per-90 output stats. Since FBref lost its Opta feed (Jan 2026) only
+# the standard + shooting tables have data, so xG, progressive passes and
+# defensive actions aren't available.
 PERFORMANCE_FEATURES = [
-    "goals_per90", "assists_per90",
-    "goals_pens_per90",
-    "xg_per90", "xg_assist_per90",
-    "npxg_per90",
+    "goals_per90", "assists_per90", "ga_per90",
+    "np_goals_per90", "np_ga_per90",
     "shots_per90", "shots_on_target_per90",
-    "goals_per_shot",
-    "progressive_passes_per90",
-    "progressive_carries_per90",
-    "tackles_won_per90",
-    "interceptions_per90",
-    "key_passes_per90",
-    "successful_dribbles_per90",
-    "aerials_won_per90",
-    "passes_into_final_third_per90",
-    "carries_into_final_third_per90",
+    "shot_accuracy", "goals_per_shot",
+    "starts_pct",
 ]
 
 # Season-level counting stats — availability and durability signal that
@@ -101,42 +112,37 @@ AVAILABILITY_FEATURES = [
     "red_cards",
 ]
 
+_CONTEXT = ["age", "contract_years_remaining", "league_prestige",
+            "is_elite_club", "club_premium", "games_played", "minutes_played",
+            "starts_pct"]
 POSITION_FEATURES = {
-    "FW": [
-        "goals_per90", "goals_pens_per90", "xg_per90", "npxg_per90",
-        "assists_per90", "xg_assist_per90",
-        "shots_per90", "shots_on_target_per90", "goals_per_shot",
-        "progressive_carries_per90", "successful_dribbles_per90",
-        "age", "contract_years_remaining", "league_prestige",
-        "is_elite_club", "club_premium",
-        "games_played", "minutes_played", "goals", "goals_per_game",
-    ],
-    "MF": [
-        "goals_per90", "assists_per90",
-        "xg_per90", "xg_assist_per90",
-        "progressive_passes_per90", "progressive_carries_per90",
-        "key_passes_per90", "passes_into_final_third_per90",
-        "tackles_won_per90", "interceptions_per90",
-        "successful_dribbles_per90",
-        "age", "contract_years_remaining", "league_prestige",
-        "is_elite_club", "club_premium",
-        "games_played", "minutes_played", "assists",
-    ],
-    "DF": [
-        "tackles_won_per90", "interceptions_per90",
-        "aerials_won_per90",
-        "progressive_passes_per90", "progressive_carries_per90",
-        "passes_into_final_third_per90",
-        "goals_per90", "assists_per90",
-        "age", "contract_years_remaining", "league_prestige",
-        "is_elite_club", "club_premium",
-        "games_played", "minutes_played", "yellow_cards", "red_cards",
-    ],
+    "FW": ["goals_per90", "np_goals_per90", "assists_per90", "ga_per90",
+           "shots_per90", "shots_on_target_per90", "shot_accuracy",
+           "goals_per_shot", "goals", "goals_per_game"] + _CONTEXT,
+    "MF": ["goals_per90", "assists_per90", "ga_per90", "np_ga_per90",
+           "shots_per90", "shots_on_target_per90", "assists"] + _CONTEXT,
+    "DF": ["goals_per90", "assists_per90", "ga_per90",
+           "yellow_cards", "red_cards"] + _CONTEXT,
 }
 
 ALL_FEATURES = list(set(
     CORE_FEATURES + PERFORMANCE_FEATURES + AVAILABILITY_FEATURES
 ))
+
+
+# Features where more should never mean a lower predicted value (keeps the
+# trees from punishing, say, a 30-goal season because few players had one)
+MONOTONE_UP = {
+    "goals_per90", "assists_per90", "ga_per90", "np_goals_per90",
+    "np_ga_per90", "shots_on_target_per90", "goals", "assists",
+    "goals_per_game", "is_elite_club", "club_premium", "league_prestige",
+    "contract_years_remaining", "starts_pct", "minutes_played", "games_played",
+}
+
+
+def monotone_for(features: list[str]) -> str:
+    return "(" + ",".join("1" if f in MONOTONE_UP else "0"
+                          for f in features) + ")"
 
 
 def get_available_features(df: pd.DataFrame, wanted: list[str]) -> list[str]:
@@ -169,6 +175,7 @@ def train_global_model(df: pd.DataFrame) -> dict:
         train_test_split(X, y, idx, test_size=0.2, random_state=42)
 
     model = xgb.XGBRegressor(
+        monotone_constraints=monotone_for(features),
         n_estimators=500,
         max_depth=6,
         learning_rate=0.05,
@@ -340,21 +347,69 @@ def generate_predictions(df: pd.DataFrame, global_result: dict) -> pd.DataFrame:
         df, features, "log_market_value"
     )
 
-    # Step 1: Raw model prediction (log scale → EUR)
-    log_predictions = model.predict(X_full)
-    raw_predictions = np.expm1(log_predictions)
-
     subset = df.loc[idx_full].copy()
+
+    # Elite output: percentile of non-penalty G+A per 90 within position
+    elite_mult = np.ones(len(subset))
+    if "np_ga_per90" in subset.columns and "position_group" in subset.columns:
+        n90 = pd.to_numeric(subset.get("90s"), errors="coerce")
+        eligible = subset["position_group"].isin(["FW", "MF"]) & \
+            (n90 >= ELITE_OUTPUT_MIN_90S)
+        pct = subset["np_ga_per90"].where(eligible) \
+            .groupby(subset["position_group"]).rank(pct=True)
+        for cutoff, mult in reversed(ELITE_OUTPUT_BOOST):
+            elite_mult = np.where(pct >= cutoff, mult, elite_mult)
+    subset["elite_output_mult"] = elite_mult
+    elite = elite_mult > 1
+
+    # Step 1: Raw model prediction (log scale → EUR), out-of-fold: each
+    # player is priced by a model trained on the other 80% of players, so
+    # the prediction reflects his stats rather than his memorised price
+    # (predicting on the training rows just echoed each player's market
+    # value back). Elite producers past PRIME_AGE are priced at their
+    # prime-age equivalent — the data has almost no expensive 30+ players
+    # to learn from, so age would otherwise swamp their output.
+    _, y_full, _, _ = prepare_data(df, features, "log_market_value")
+    age_i = features.index("age") if "age" in features else None
+    oof = np.zeros(len(y_full))
+    folds = KFold(n_splits=5, shuffle=True, random_state=42)
+    for train_i, test_i in folds.split(X_full):
+        fold_model = clone(model)
+        fold_model.fit(X_full[train_i], y_full[train_i], verbose=False)
+        pred = fold_model.predict(X_full[test_i])
+        if age_i is not None:
+            X_prime = X_full[test_i].copy()
+            X_prime[:, age_i] = np.minimum(X_prime[:, age_i], PRIME_AGE)
+            prime = fold_model.predict(X_prime)
+            older_elite = elite[test_i] & (X_full[test_i, age_i] > PRIME_AGE)
+            pred = np.where(older_elite, np.maximum(pred, prime), pred)
+        oof[test_i] = pred
+    raw_predictions = np.expm1(oof)
     subset["predicted_raw_eur"] = raw_predictions
 
-    # Step 2: Apply MODEST adjustments
+    # Step 2: Adjustments (age, elite output, club brand, star power)
     adjusted = raw_predictions.copy()
 
     if "age_potential_mult" in subset.columns:
-        adjusted = adjusted * subset["age_potential_mult"].values
+        age_mult = subset["age_potential_mult"].values.copy()
+        age_mult = np.where(elite_mult > 1,
+                            np.maximum(age_mult, ELITE_AGE_FLOOR), age_mult)
+        subset["age_mult_applied"] = age_mult
+        adjusted = adjusted * age_mult
+
+    adjusted = adjusted * elite_mult
 
     if "club_premium" in subset.columns:
         adjusted = adjusted * subset["club_premium"].values
+
+    # Star power from international profile
+    caps = pd.to_numeric(subset.get("tm_international_caps"),
+                         errors="coerce").fillna(0).values
+    star = np.ones(len(subset))
+    for min_caps, mult in reversed(STAR_POWER):
+        star = np.where(caps >= min_caps, mult, star)
+    subset["star_power_mult"] = star
+    adjusted = adjusted * star
 
     subset["predicted_adjusted_eur"] = adjusted
 

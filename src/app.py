@@ -69,30 +69,31 @@ LEAGUE_COLORS = {
 
 POSITION_LABELS = {"FW": "Forward", "MF": "Midfielder", "DF": "Defender"}
 
+# Per-90 stats FBref still publishes (no xG, passing or defensive data
+# since January 2026)
 RADAR_STATS = {
     "FW": {
         "goals_per90": "Goals",
-        "xg_per90": "xG",
+        "np_goals_per90": "Non-pen Goals",
         "assists_per90": "Assists",
+        "shots_per90": "Shots",
         "shots_on_target_per90": "Shots OT",
-        "progressive_carries_per90": "Prog Carries",
-        "successful_dribbles_per90": "Dribbles",
+        "goals_per_shot": "Conversion",
     },
     "MF": {
         "goals_per90": "Goals",
         "assists_per90": "Assists",
-        "progressive_passes_per90": "Prog Passes",
-        "progressive_carries_per90": "Prog Carries",
-        "key_passes_per90": "Key Passes",
-        "tackles_won_per90": "Tackles",
+        "ga_per90": "G+A",
+        "shots_per90": "Shots",
+        "shot_accuracy": "Shot Accuracy",
+        "starts_pct": "Starts %",
     },
     "DF": {
-        "tackles_won_per90": "Tackles",
-        "interceptions_per90": "Interceptions",
-        "aerials_won_per90": "Aerials",
-        "progressive_passes_per90": "Prog Passes",
-        "progressive_carries_per90": "Prog Carries",
         "goals_per90": "Goals",
+        "assists_per90": "Assists",
+        "ga_per90": "G+A",
+        "shots_per90": "Shots",
+        "starts_pct": "Starts %",
     },
 }
 
@@ -781,20 +782,29 @@ with tab5:
     # Methodology
     st.markdown("#### Methodology")
     st.markdown(f"""
-**Data:** FBref (per-90 performance stats) + Transfermarkt via Kaggle (market values).
-{len(df)} outfield players with ≥900 minutes across the Big 5 European Leagues.
+**Data:** FBref {SEASON} stats + current Transfermarkt market values and clubs.
+{len(df)} outfield players with ≥900 minutes in {SEASON} who are still at a Big 5 club.
 
-**Model:** XGBoost gradient-boosted trees. Features include goals, assists, xG, xAG,
-progressive passes & carries, tackles, interceptions, age, contract length, league prestige, and club tier.
+**Model:** XGBoost gradient-boosted trees on per-90 goals, assists, non-penalty goals,
+shots, shots on target, shot accuracy and conversion, starts, minutes, age, contract length,
+league prestige and club tier. FBref lost its advanced data (xG, passing, defensive actions)
+in January 2026, so defenders and deep midfielders are judged on less — read their gaps
+with that in mind. Output stats are constrained so more production never lowers a value.
+
+**Out-of-fold predictions:** each player is priced by a model trained on the other 80% of
+players, so his own price can't leak into his prediction.
+
+**Adjustments:** age (×1.15 under 21 → ×0.85 over 30), elite output (top 2/5/10% of
+forwards & midfielders by non-penalty G+A per 90: ×1.15/1.10/1.05, priced at prime age and
+with the age discount capped at ×0.95), club brand (Bayern ×1.25; Real Madrid, Barcelona
+×1.20; PSG, Man City ×1.15; other elite clubs ×1.10) and star power (50+ caps ×1.04,
+100+ caps ×1.08).
 
 **Reality Grounding:** Predictions are blended {int(model_weight*100)}% model /
 {int((1-model_weight)*100)}% market value. The market captures factors pure stats miss —
 brand value, shirt sales, social media following, agent leverage, and scarcity premiums.
 
 **Gap Cap:** ±60% maximum. No player can be more than 60% under/overvalued.
-
-**Position Models:** Separate XGBoost models for forwards, midfielders, and defenders,
-since value drivers differ by position (goals for strikers vs tackles for center-backs).
     """)
 
     # Export full dataset

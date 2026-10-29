@@ -123,10 +123,15 @@ def merge_stat_tables(data_dir: str, season: str) -> pd.DataFrame:
                 merged = df
             else:
                 # Use rk + player + squad as keys for exact matching
+                # Join on who the player is — not "rk", which is each
+                # table's own row number and differs between tables (joining
+                # on it left the shooting/passing/possession stats empty)
                 primary_keys = []
-                for k in ["rk", "player", "squad"]:
+                for k in ["player", "squad", "born"]:
                     if k in merged.columns and k in df.columns:
                         primary_keys.append(k)
+                df = df.drop(columns=["rk"], errors="ignore") \
+                       .drop_duplicates(subset=primary_keys)
 
                 if not primary_keys:
                     print(f"    ⚠  No common merge keys — skipping {stat}")

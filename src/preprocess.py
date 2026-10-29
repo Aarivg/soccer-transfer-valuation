@@ -44,6 +44,14 @@ ELITE_CLUBS = TIER1_CLUBS | {
     "Atlético de Madrid", "Atlético Madrid", "Borussia Dortmund", "Dortmund",
 }
 
+# Club-specific brand premiums (multiplier on the model's prediction).
+# Deliberately opinionated: Bayern gets the biggest bump.
+CLUB_BRAND_PREMIUM = {
+    "FC Bayern Munich": 1.25, "Bayern Munich": 1.25, "Bayern München": 1.25,
+    "Real Madrid": 1.20, "FC Barcelona": 1.20, "Barcelona": 1.20,
+    "Paris Saint-Germain": 1.15, "Paris S-G": 1.15, "Manchester City": 1.15,
+}
+
 # Transfermarkt competition code → league name
 TM_LEAGUES = {
     "GB1": "Premier League", "ES1": "La Liga", "L1": "Bundesliga",
@@ -65,6 +73,17 @@ def clean_name(name: str) -> str:
     words = [w for w in name.split()
              if w not in {"jr.", "jr", "sr.", "sr", "ii", "iii"}]
     return " ".join(words)
+
+
+def pick_candidate(cands: pd.DataFrame, row: pd.Series) -> pd.Series:
+    """Namesakes born the same year (e.g. PSG's and Genoa's Vitinha): take
+    the one whose current club best matches the FBref club."""
+    if len(cands) == 1:
+        return cands.iloc[0]
+    squad = str(row.get("squad", ""))
+    score = cands["current_club_name"].astype(str).map(
+        lambda c: fuzz.token_set_ratio(squad, c)) if USE_RAPIDFUZZ else None
+    return cands.loc[score.idxmax()] if score is not None else cands.iloc[0]
 
 
 # ── Fuzzy matching ───────────────────────────────────────────────────
@@ -132,7 +151,7 @@ def fuzzy_match_players(
                         result = loose
             if result:
                 best_name, score, _ = result
-                tm_match = pool[pool["_clean_name"] == best_name].iloc[0]
+                tm_match = pick_candidate(pool[pool["_clean_name"] == best_name], row)
                 merged_row = {**row.to_dict(), **{
                     f"tm_{k}": v for k, v in tm_match.to_dict().items()
                     if k not in ("_clean_name", "_birth_year")
@@ -145,7 +164,7 @@ def fuzzy_match_players(
             close = get_close_matches(name, tm_names, n=1, cutoff=0.7)
             if close:
                 best_name = close[0]
-                tm_match = pool[pool["_clean_name"] == best_name].iloc[0]
+                tm_match = pick_candidate(pool[pool["_clean_name"] == best_name], row)
                 score = SequenceMatcher(None, name, best_name).ratio() * 100
                 merged_row = {**row.to_dict(), **{
                     f"tm_{k}": v for k, v in tm_match.to_dict().items()
@@ -164,6 +183,49 @@ def fuzzy_match_players(
 
     result_df = result_df.drop(columns=["_clean_name"], errors="ignore")
     return result_df
+
+
+# ── FBref performance features ───────────────────────────────────────
+def _num(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    return pd.to_numeric(df[col].astype(str).str.replace(",", ""),
+                         errors="coerce")
+
+
+def add_fbref_basic_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Per-90 output stats from the FBref tables that still have data.
+
+    Since FBref lost its Opta feed (Jan 2026) the passing, possession and
+    defensive exports are blank, and there is no xG/xAG — but the standard
+    and shooting tables (goals, assists, penalties, starts, shots, shots on
+    target) are complete, and they are the clearest signal of attacking
+    output.
+    """
+    n90 = _num(df, "90s")
+    n90 = n90.where(n90 > 0)
+    goals, assists = _num(df, "gls"), _num(df, "ast")
+    np_goals = _num(df, "g-pk")
+    shots, sot = _num(df, "sh"), _num(df, "sot")
+
+    feats = {
+        "goals_per90": goals / n90,
+        "assists_per90": assists / n90,
+        "ga_per90": (goals + assists) / n90,
+        "np_goals_per90": np_goals / n90,
+        "np_ga_per90": (np_goals + assists) / n90,
+        "shots_per90": shots / n90,
+        "shots_on_target_per90": sot / n90,
+        "shot_accuracy": (sot / shots.where(shots > 0)),
+        "goals_per_shot": (goals / shots.where(shots > 0)),
+        "starts_pct": _num(df, "starts") / _num(df, "mp").where(lambda s: s > 0),
+    }
+    for name, values in feats.items():
+        df[name] = values.replace([np.inf, -np.inf], np.nan).round(4)
+    filled = int(df["shots_per90"].notna().sum())
+    print(f"  → FBref per-90 output stats for {filled}/{len(df)} players")
+    return df
 
 
 # ── Feature engineering ──────────────────────────────────────────────
@@ -218,6 +280,8 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
                 df[per90] = (
                     pd.to_numeric(df[raw], errors="coerce") / nineties
                 ).replace([np.inf, -np.inf], np.nan)
+
+    df = add_fbref_basic_features(df)
 
     # ── Position encoding ────────────────────────────────────────────
     if "pos" in df.columns:
@@ -295,10 +359,15 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         df["is_elite_club"] = club.isin(ELITE_CLUBS).astype(int)
         df["is_tier1_club"] = club.isin(TIER1_CLUBS).astype(int)
 
-        # Club premium multiplier
+        # Club brand premium — the "outside soccer" bias: brand, revenue,
+        # Champions League money, shirt sales, negotiating power. Clubs in
+        # CLUB_BRAND_PREMIUM get their own multiplier; other elite clubs
+        # get 1.10.
         df["club_premium"] = 1.0
         df.loc[df["is_elite_club"] == 1, "club_premium"] = 1.10
         df.loc[df["is_tier1_club"] == 1, "club_premium"] = 1.15
+        brand = club.map(CLUB_BRAND_PREMIUM)
+        df.loc[brand.notna(), "club_premium"] = brand[brand.notna()]
 
     # ── Contract years ───────────────────────────────────────────────
     contract_col = None
