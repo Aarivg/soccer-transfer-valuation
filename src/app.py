@@ -1035,7 +1035,7 @@ with tab7:
 # ── Footer ───────────────────────────────────────────────────────────
 st.divider()
 st.caption(
-    f"Data: FBref ({SEASON}) · Transfermarkt (via Kaggle)  |  "
+    f"Data: FBref ({SEASON}) · Transfermarkt  |  "
     f"Model: XGBoost · Blended predictions  |  "
     f"Portfolio project — not for commercial use"
 )
